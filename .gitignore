@@ -1,0 +1,104 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment variables (contains secrets)
+.env
+.env.local
+.env.*.local
+
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+nul
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Tool-specific folders (exclude from repo)
+.claude/
+.serena/
+.tmp_ottomator/
+
+# Output and test data (exclude from repo)
+output/
+test_output/
+test_pdf_output/
+logs/
+*.log
+
+# Crawl artifacts
+crawl_results/
+*.jsonl
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Cache
+.cache/
+*.cache
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Ruff
+.ruff_cache/
+
+# Distribution
+*.manifest
+*.spec
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
