@@ -102,3 +102,11 @@ dmypy.json
 *.temp
 tmp/
 temp/
+tmp_*.py
+
+# Cache directories
+.flashrank_cache/
+
+# Data directories (user uploads, sample docs)
+data/
+documents/

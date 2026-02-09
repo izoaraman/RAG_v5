@@ -38,16 +38,31 @@ class DatabasePool:
         return self._database_url
 
     async def initialize(self) -> None:
-        """Create connection pool."""
+        """Create connection pool with retry logic."""
         if not self._pool:
-            self._pool = await asyncpg.create_pool(
-                self.database_url,
-                min_size=5,
-                max_size=20,
-                max_inactive_connection_lifetime=300,
-                command_timeout=60,
-            )
-            logger.info("Database connection pool initialized")
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    self._pool = await asyncpg.create_pool(
+                        self.database_url,
+                        min_size=2,
+                        max_size=10,
+                        max_inactive_connection_lifetime=60,
+                        command_timeout=30,
+                        timeout=30,  # Connection timeout
+                    )
+                    logger.info("Database connection pool initialized")
+                    return
+                except Exception as e:
+                    logger.warning(
+                        f"Database connection attempt {attempt + 1}/{max_retries} failed: {e}"
+                    )
+                    if attempt < max_retries - 1:
+                        import asyncio
+
+                        await asyncio.sleep(2**attempt)  # Exponential backoff
+                    else:
+                        raise
 
     async def close(self) -> None:
         """Close connection pool."""
@@ -61,6 +76,8 @@ class DatabasePool:
         """Acquire a connection from the pool."""
         if not self._pool:
             await self.initialize()
+
+        assert self._pool is not None
 
         async with self._pool.acquire() as connection:
             yield connection
@@ -111,6 +128,46 @@ async def initialize_database() -> None:
             CREATE INDEX IF NOT EXISTS chunks_embedding_idx
             ON chunks USING ivfflat (embedding vector_cosine_ops)
             WITH (lists = 100)
+        """)
+
+        # Create document_summaries table for LogicRAG-style warm-up retrieval
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS document_summaries (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                summary TEXT NOT NULL,
+                key_entities TEXT[] DEFAULT '{}',
+                key_topics TEXT[] DEFAULT '{}',
+                embedding vector(1536),
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        # Create index for summary vector search
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS document_summaries_embedding_idx
+            ON document_summaries USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = 100)
+        """)
+
+        # Add content_hash column to chunks table for deduplication
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'chunks' AND column_name = 'content_hash'
+                ) THEN
+                    ALTER TABLE chunks ADD COLUMN content_hash TEXT;
+                END IF;
+            END $$;
+        """)
+
+        # Create unique index on content_hash for dedup lookups
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS chunks_content_hash_idx
+            ON chunks (content_hash)
+            WHERE content_hash IS NOT NULL
         """)
 
         logger.info("Database tables initialized")
@@ -392,3 +449,64 @@ async def test_connection() -> bool:
     except Exception as e:
         logger.error(f"Database connection test failed: {e}")
         return False
+
+
+async def chunk_hash_exists(content_hash: str) -> bool:
+    """Check if a chunk with this content hash already exists."""
+    async with db_pool.acquire() as conn:
+        result = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM chunks WHERE content_hash = $1)",
+            content_hash,
+        )
+        return result
+
+
+async def store_document_summary(
+    document_id: str,
+    summary: str,
+    key_entities: list[str],
+    key_topics: list[str],
+    embedding: list[float] | None = None,
+) -> str:
+    """Store a document summary in the database."""
+    embedding_str = None
+    if embedding:
+        embedding_str = "[" + ",".join(map(str, embedding)) + "]"
+
+    async with db_pool.acquire() as conn:
+        result = await conn.fetchrow(
+            """
+            INSERT INTO document_summaries (document_id, summary, key_entities, key_topics, embedding)
+            VALUES ($1::uuid, $2, $3, $4, $5::vector)
+            RETURNING id::text
+            """,
+            document_id,
+            summary,
+            key_entities,
+            key_topics,
+            embedding_str,
+        )
+        return result["id"]
+
+
+async def get_document_summary(document_id: str) -> dict[str, Any] | None:
+    """Get summary for a document."""
+    async with db_pool.acquire() as conn:
+        result = await conn.fetchrow(
+            """
+            SELECT id::text, document_id::text, summary, key_entities, key_topics, created_at
+            FROM document_summaries
+            WHERE document_id = $1::uuid
+            """,
+            document_id,
+        )
+        if result:
+            return {
+                "id": result["id"],
+                "document_id": result["document_id"],
+                "summary": result["summary"],
+                "key_entities": list(result["key_entities"]) if result["key_entities"] else [],
+                "key_topics": list(result["key_topics"]) if result["key_topics"] else [],
+                "created_at": result["created_at"].isoformat(),
+            }
+        return None

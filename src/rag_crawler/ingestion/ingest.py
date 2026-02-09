@@ -19,8 +19,11 @@ from typing import Any, Callable
 from dotenv import load_dotenv
 
 from rag_crawler.ingestion.chunker import ChunkingConfig, DocumentChunk, create_chunker
+from rag_crawler.ingestion.entity_extractor import get_entity_extractor
 from rag_crawler.ingestion.embedder import create_embedder
+from rag_crawler.ingestion.summarizer import DocumentSummarizer
 from rag_crawler.utils.db_utils import (
+    chunk_hash_exists,
     close_database,
     db_pool,
     delete_document,
@@ -45,6 +48,7 @@ class DocumentIngestionPipeline:
         documents_folder: str = "documents",
         clean_before_ingest: bool = False,
         force_update: bool = False,
+        source_prefix: str = "",
     ):
         """
         Initialize ingestion pipeline.
@@ -54,11 +58,13 @@ class DocumentIngestionPipeline:
             documents_folder: Folder containing documents.
             clean_before_ingest: Whether to clean ALL existing data (use with caution).
             force_update: Whether to re-ingest documents that already exist.
+            source_prefix: Prefix to add to source paths (e.g., "new_uploads/" for filtering).
         """
         self.config = config
         self.documents_folder = documents_folder
         self.clean_before_ingest = clean_before_ingest
         self.force_update = force_update
+        self.source_prefix = source_prefix
 
         # Initialize components
         self.chunker_config = ChunkingConfig(
@@ -71,6 +77,8 @@ class DocumentIngestionPipeline:
 
         self.chunker = create_chunker(self.chunker_config)
         self.embedder = create_embedder()
+        self.summarizer = DocumentSummarizer()
+        self.entity_extractor = get_entity_extractor()
 
         self._initialized = False
 
@@ -130,7 +138,8 @@ class DocumentIngestionPipeline:
 
         for i, file_path in enumerate(document_files):
             try:
-                document_source = os.path.relpath(file_path, self.documents_folder)
+                rel_path = os.path.relpath(file_path, self.documents_folder)
+                document_source = self.source_prefix + rel_path if self.source_prefix else rel_path
 
                 # Check if document already exists
                 if document_source in existing_docs and not self.force_update:
@@ -157,7 +166,7 @@ class DocumentIngestionPipeline:
                     logger.info(f"[UPDATE] Replacing existing: {existing['title']}")
                     await delete_document(existing["id"])
 
-                logger.info(f"Processing file {i+1}/{len(document_files)}: {file_path}")
+                logger.info(f"Processing file {i + 1}/{len(document_files)}: {file_path}")
                 result = await self._ingest_single_document(file_path)
                 results.append(result)
                 new_docs += 1
@@ -233,7 +242,7 @@ class DocumentIngestionPipeline:
         for i, page_data in enumerate(results_data):
             try:
                 url = page_data.get("url", "")
-                title = page_data.get("title", "Untitled")
+                title = page_data.get("title") or "Untitled"
 
                 # Check if document already exists (by URL as source)
                 if url in existing_docs and not self.force_update:
@@ -272,7 +281,7 @@ class DocumentIngestionPipeline:
                 results.append(
                     IngestionResult(
                         document_id="",
-                        title=page_data.get("title", "Unknown"),
+                        title=page_data.get("title") or "Unknown",
                         chunks_created=0,
                         processing_time_ms=0,
                         errors=[str(e)],
@@ -295,7 +304,9 @@ class DocumentIngestionPipeline:
 
         document_content, docling_doc = self._read_document(file_path)
         document_title = self._extract_title(document_content, file_path)
-        document_source = os.path.relpath(file_path, self.documents_folder)
+        # Compute source path with optional prefix for filtering
+        rel_path = os.path.relpath(file_path, self.documents_folder)
+        document_source = self.source_prefix + rel_path if self.source_prefix else rel_path
         document_metadata = self._extract_document_metadata(document_content, file_path)
 
         logger.info(f"Processing document: {document_title}")
@@ -334,6 +345,19 @@ class DocumentIngestionPipeline:
             document_metadata,
         )
 
+        # Generate and store document summary (LogicRAG P2)
+        try:
+            await self.summarizer.summarize_and_store(
+                document_id=document_id,
+                title=document_title,
+                content=document_content,
+                source=document_source,
+                embedder=self.embedder,
+            )
+            logger.info(f"Generated summary for document: {document_title}")
+        except Exception as e:
+            logger.warning(f"Failed to generate summary for {document_title}: {e}")
+
         logger.info(f"Saved document to PostgreSQL with ID: {document_id}")
 
         processing_time = (datetime.now() - start_time).total_seconds() * 1000
@@ -351,7 +375,7 @@ class DocumentIngestionPipeline:
         start_time = datetime.now()
 
         url = page_data.get("url", "")
-        title = page_data.get("title", "Untitled")
+        title = page_data.get("title") or url or "Untitled"
         content = page_data.get("markdown", "")
         content_type = page_data.get("content_type", "page")
 
@@ -394,6 +418,19 @@ class DocumentIngestionPipeline:
             embedded_chunks,
             metadata,
         )
+
+        # Generate and store document summary (LogicRAG P2)
+        try:
+            await self.summarizer.summarize_and_store(
+                document_id=document_id,
+                title=title,
+                content=content,
+                source=url,
+                embedder=self.embedder,
+            )
+            logger.info(f"Generated summary for crawled page: {title}")
+        except Exception as e:
+            logger.warning(f"Failed to generate summary for {title}: {e}")
 
         return IngestionResult(
             document_id=document_id,
@@ -468,7 +505,9 @@ class DocumentIngestionPipeline:
             try:
                 from docling.document_converter import DocumentConverter
 
-                logger.info(f"Converting {file_ext} file using Docling: {os.path.basename(file_path)}")
+                logger.info(
+                    f"Converting {file_ext} file using Docling: {os.path.basename(file_path)}"
+                )
 
                 converter = DocumentConverter()
                 result = converter.convert(file_path)
@@ -598,16 +637,33 @@ class DocumentIngestionPipeline:
 
                 document_id = document_result["id"]
 
+                # Enrich chunk metadata with entities/topics and dedup
+                dedup_count = 0
+                for chunk in chunks:
+                    # Enrich metadata with entities and topics (LogicRAG P3)
+                    chunk.metadata = self.entity_extractor.enrich_chunk_metadata(
+                        chunk.content, chunk.metadata
+                    )
+
                 # Insert chunks
                 for chunk in chunks:
+                    # Chunk deduplication (LogicRAG P2)
+                    if chunk.content_hash:
+                        try:
+                            if await chunk_hash_exists(chunk.content_hash):
+                                dedup_count += 1
+                                continue
+                        except Exception:
+                            pass  # If dedup check fails, insert anyway
+
                     embedding_data = None
                     if chunk.embedding:
                         embedding_data = "[" + ",".join(map(str, chunk.embedding)) + "]"
 
                     await conn.execute(
                         """
-                        INSERT INTO chunks (document_id, content, embedding, chunk_index, metadata, token_count)
-                        VALUES ($1::uuid, $2, $3::vector, $4, $5, $6)
+                        INSERT INTO chunks (document_id, content, embedding, chunk_index, metadata, token_count, content_hash)
+                        VALUES ($1::uuid, $2, $3::vector, $4, $5, $6, $7)
                         """,
                         document_id,
                         chunk.content,
@@ -615,7 +671,11 @@ class DocumentIngestionPipeline:
                         chunk.index,
                         json.dumps(chunk.metadata),
                         chunk.token_count,
+                        chunk.content_hash,
                     )
+
+                if dedup_count > 0:
+                    logger.info(f"Skipped {dedup_count} duplicate chunks")
 
                 return document_id
 
@@ -661,6 +721,12 @@ def main() -> None:
     parser.add_argument("--max-tokens", type=int, default=512, help="Max tokens per chunk")
     parser.add_argument("--no-semantic", action="store_true", help="Disable semantic chunking")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+    parser.add_argument(
+        "--source-prefix",
+        type=str,
+        default="",
+        help="Prefix to add to source paths (e.g., 'new_uploads/' for filtering)",
+    )
 
     args = parser.parse_args()
 
@@ -682,6 +748,7 @@ def main() -> None:
         documents_folder=args.documents,
         clean_before_ingest=args.clean,
         force_update=args.force_update,
+        source_prefix=args.source_prefix,
     )
 
     def progress_callback(current: int, total: int) -> None:
@@ -705,10 +772,7 @@ def main() -> None:
             # Calculate statistics
             new_docs = [r for r in results if r.chunks_created > 0]
             skipped_docs = [r for r in results if "Already exists" in str(r.errors)]
-            error_docs = [
-                r for r in results
-                if r.errors and "Already exists" not in str(r.errors)
-            ]
+            error_docs = [r for r in results if r.errors and "Already exists" not in str(r.errors)]
 
             print("\n" + "=" * 50)
             print("INGESTION SUMMARY")

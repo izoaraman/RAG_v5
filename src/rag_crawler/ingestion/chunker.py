@@ -10,6 +10,8 @@ Uses Docling's HybridChunker which combines:
 
 import logging
 import re
+import hashlib
+import importlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -50,11 +52,14 @@ class DocumentChunk:
     metadata: dict[str, Any] = field(default_factory=dict)
     token_count: int | None = None
     embedding: list[float] | None = None
+    content_hash: str | None = None
 
     def __post_init__(self) -> None:
         """Calculate token count if not provided."""
         if self.token_count is None:
             self.token_count = len(self.content) // 4
+        if self.content_hash is None and self.content:
+            self.content_hash = hashlib.sha256(self.content.strip().lower().encode()).hexdigest()
 
 
 class DoclingHybridChunker:
@@ -90,9 +95,10 @@ class DoclingHybridChunker:
     def chunker(self):
         """Lazy-load HybridChunker."""
         if self._chunker is None:
-            from docling.chunking import HybridChunker
+            chunking_module = importlib.import_module("docling.chunking")
+            hybrid_chunker_cls = getattr(chunking_module, "HybridChunker")
 
-            self._chunker = HybridChunker(
+            self._chunker = hybrid_chunker_cls(
                 tokenizer=self.tokenizer,
                 max_tokens=self.config.max_tokens,
                 merge_peers=True,
@@ -147,13 +153,16 @@ class DoclingHybridChunker:
             for i, chunk in enumerate(chunks):
                 # Get contextualized text (includes heading hierarchy)
                 contextualized_text = self.chunker.contextualize(chunk=chunk)
+                chunk_content = contextualized_text.strip()
                 token_count = len(self.tokenizer.encode(contextualized_text))
+                chunk_hash = hashlib.sha256(chunk_content.lower().encode()).hexdigest()
 
                 chunk_metadata = {
                     **base_metadata,
                     "total_chunks": len(chunks),
                     "token_count": token_count,
                     "has_context": True,
+                    "content_hash": chunk_hash,
                 }
 
                 start_char = current_pos
@@ -161,12 +170,13 @@ class DoclingHybridChunker:
 
                 document_chunks.append(
                     DocumentChunk(
-                        content=contextualized_text.strip(),
+                        content=chunk_content,
                         index=i,
                         start_char=start_char,
                         end_char=end_char,
                         metadata=chunk_metadata,
                         token_count=token_count,
+                        content_hash=chunk_hash,
                     )
                 )
 
@@ -208,11 +218,13 @@ class DoclingHybridChunker:
                 end = chunk_end
 
             if chunk_text.strip():
+                chunk_content = chunk_text.strip()
                 token_count = len(self.tokenizer.encode(chunk_text))
+                chunk_hash = hashlib.sha256(chunk_content.lower().encode()).hexdigest()
 
                 chunks.append(
                     DocumentChunk(
-                        content=chunk_text.strip(),
+                        content=chunk_content,
                         index=chunk_index,
                         start_char=start,
                         end_char=end,
@@ -220,8 +232,10 @@ class DoclingHybridChunker:
                             **base_metadata,
                             "chunk_method": "simple_fallback",
                             "total_chunks": -1,
+                            "content_hash": chunk_hash,
                         },
                         token_count=token_count,
+                        content_hash=chunk_hash,
                     )
                 )
 
@@ -335,12 +349,15 @@ class SimpleChunker:
         metadata: dict[str, Any],
     ) -> DocumentChunk:
         """Create a DocumentChunk object."""
+        chunk_content = content.strip()
+        chunk_hash = hashlib.sha256(chunk_content.lower().encode()).hexdigest()
         return DocumentChunk(
-            content=content.strip(),
+            content=chunk_content,
             index=index,
             start_char=start_pos,
             end_char=end_pos,
-            metadata=metadata,
+            metadata={**metadata, "content_hash": chunk_hash},
+            content_hash=chunk_hash,
         )
 
 

@@ -149,8 +149,11 @@ async def run_crawler(args: argparse.Namespace) -> int:
     # Generate output
     generator = MarkdownGenerator(output_dir=config.output_dir)
 
-    # Save main report
+    # Save main report (markdown)
     report_path = generator.save_report(report)
+
+    # Save JSON report for ingestion pipeline
+    json_report_path = generator.save_json_report(report)
 
     # Optionally save individual pages
     if args.save_individual:
@@ -162,7 +165,8 @@ async def run_crawler(args: argparse.Namespace) -> int:
     print(f"Pages crawled: {len(report.results)}")
     print(f"Pages skipped: {len(report.skipped)}")
     print(f"Peak memory: {report.peak_memory_mb} MB")
-    print(f"Report saved: {report_path}")
+    print(f"Markdown report: {report_path}")
+    print(f"JSON report: {json_report_path}")
     print("=" * 60)
 
     return 0
