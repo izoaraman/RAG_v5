@@ -1,11 +1,36 @@
-"""Provider configuration for Azure OpenAI embedding models."""
+"""Provider configuration for Azure OpenAI models."""
 
 import os
 
 from dotenv import load_dotenv
+from langchain_openai import AzureChatOpenAI
 from openai import AsyncAzureOpenAI
+from pydantic import SecretStr
 
 load_dotenv()
+
+# Shared LLM instance (singleton)
+_shared_llm: AzureChatOpenAI | None = None
+
+
+def get_shared_llm(temperature: float = 0.0) -> AzureChatOpenAI:
+    """
+    Get shared Azure OpenAI chat client (singleton).
+
+    Reuses a single HTTP connection pool across all agents
+    instead of creating 5+ separate clients.
+    """
+    global _shared_llm
+    if _shared_llm is None:
+        api_key = os.getenv("AZURE_OPENAI_API_KEY", "")
+        _shared_llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_key=SecretStr(api_key) if api_key else None,
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
+            temperature=temperature,
+        )
+    return _shared_llm
 
 
 def get_embedding_client() -> AsyncAzureOpenAI:

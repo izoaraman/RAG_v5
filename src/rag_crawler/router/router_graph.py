@@ -210,6 +210,7 @@ class RAGRouter:
                 "documents_reranked": len(result.get("reranked_documents", [])),
                 "steps": result.get("step_count", 0),
                 "error": result.get("error"),
+                "metadata": result.get("metadata", {}),
             }
 
             response_text = str(response.get("response", ""))

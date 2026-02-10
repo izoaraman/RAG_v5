@@ -720,6 +720,20 @@ DATABASE_URL=postgresql://user:pass@server:5432/db?sslmode=require
                         f'<div class="answer-card">{clickable_content}</div>',
                         unsafe_allow_html=True,
                     )
+                    # Show agent badge for LogicRAG multi-hop queries (persisted)
+                    agent_used = message.get("agent_used", "")
+                    if agent_used == "logic_rag":
+                        meta = message.get("metadata", {})
+                        round_count = meta.get("round_count", 0)
+                        subproblems = meta.get("subproblems", [])
+                        st.caption(
+                            f"Multi-hop reasoning | {round_count} rounds | "
+                            f"{len(subproblems)} sub-problems"
+                        )
+                    # Show compact sources below answer (persisted)
+                    sources = message.get("sources", [])
+                    if sources:
+                        render_sources_compact(sources, message["content"])
                 else:
                     st.markdown(message["content"])
 
@@ -835,6 +849,8 @@ DATABASE_URL=postgresql://user:pass@server:5432/db?sslmode=require
                         "role": "assistant",
                         "content": response,
                         "sources": sources,
+                        "agent_used": agent_used,
+                        "metadata": result.get("metadata", {}),
                     }
                 )
                 st.session_state.references_last = sources

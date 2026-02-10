@@ -62,36 +62,47 @@ Only respond with the JSON object, no other text."""
 
 class QueryClassifier:
     """
-    LLM-based query classifier using Azure OpenAI.
+    Fast query classifier with heuristic-first approach.
 
-    Analyzes user queries and classifies them for optimal agent routing.
+    Uses regex/pattern matching for instant classification (< 1ms).
+    LLM-based classification available as optional mode for ambiguous queries.
     """
 
     def __init__(
         self,
         model_name: str | None = None,
         temperature: float = 0.0,
+        use_llm: bool = False,
     ):
         """
         Initialize the query classifier.
 
         Args:
-            model_name: Azure OpenAI deployment name.
+            model_name: Azure OpenAI deployment name (only used if use_llm=True).
             temperature: LLM temperature (lower = more deterministic).
+            use_llm: Whether to use LLM for classification (default: False for speed).
         """
         self.model_name = model_name or os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
         self.temperature = temperature
+        self.use_llm = use_llm
 
-        # Initialize Azure OpenAI
-        self.llm = AzureChatOpenAI(
-            azure_deployment=self.model_name,
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            api_key=SecretStr(os.getenv("AZURE_OPENAI_API_KEY", "")),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
-            temperature=temperature,
-        )
+        # Lazy-initialize LLM only when needed
+        self._llm: AzureChatOpenAI | None = None
 
-        logger.info(f"QueryClassifier initialized with model: {self.model_name}")
+        logger.info(f"QueryClassifier initialized (mode={'llm' if use_llm else 'heuristic'})")
+
+    @property
+    def llm(self) -> AzureChatOpenAI:
+        """Lazy-initialize Azure OpenAI client."""
+        if self._llm is None:
+            self._llm = AzureChatOpenAI(
+                azure_deployment=self.model_name,
+                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+                api_key=SecretStr(os.getenv("AZURE_OPENAI_API_KEY", "")),
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
+                temperature=self.temperature,
+            )
+        return self._llm
 
     async def classify(
         self,
@@ -101,6 +112,9 @@ class QueryClassifier:
         """
         Classify a user query.
 
+        Uses fast heuristic classification by default.
+        Falls back to LLM only when use_llm=True.
+
         Args:
             query: The user's question.
             conversation_history: Previous conversation for context.
@@ -108,14 +122,25 @@ class QueryClassifier:
         Returns:
             QueryAnalysis with classification result.
         """
+        # Fast path: heuristic classification (< 1ms)
+        if not self.use_llm:
+            return self._heuristic_classification(query)
+
+        # Slow path: LLM classification (2-5s)
+        return await self._llm_classification(query, conversation_history)
+
+    async def _llm_classification(
+        self,
+        query: str,
+        conversation_history: list[dict[str, str]] | None = None,
+    ) -> QueryAnalysis:
+        """LLM-based classification for when high accuracy is needed."""
         try:
-            # Build context from conversation history
             context = ""
             if conversation_history and len(conversation_history) > 0:
-                recent = conversation_history[-4:]  # Last 2 exchanges
+                recent = conversation_history[-4:]
                 context = "\n".join([f"{msg['role']}: {msg['content']}" for msg in recent])
 
-            # Build the classification prompt
             user_prompt = f"""Classify the following query:
 
 Query: {query}
@@ -124,7 +149,6 @@ Query: {query}
 
 Respond with JSON only."""
 
-            # Call LLM
             messages = [
                 SystemMessage(content=CLASSIFICATION_SYSTEM_PROMPT),
                 HumanMessage(content=user_prompt),
@@ -137,9 +161,7 @@ Respond with JSON only."""
             else:
                 response_text = str(response_content).strip()
 
-            # Parse JSON response
             try:
-                # Handle potential markdown code blocks
                 if response_text.startswith("```"):
                     response_text = response_text.split("```")[1]
                     if response_text.startswith("json"):
@@ -166,11 +188,11 @@ Respond with JSON only."""
 
             except json.JSONDecodeError as e:
                 logger.warning(f"Failed to parse LLM response as JSON: {e}")
-                return self._fallback_classification(query)
+                return self._heuristic_classification(query)
 
         except Exception as e:
-            logger.error(f"Query classification failed: {e}")
-            return self._fallback_classification(query)
+            logger.error(f"LLM classification failed, using heuristic: {e}")
+            return self._heuristic_classification(query)
 
     def classify_sync(
         self,
@@ -197,9 +219,12 @@ Respond with JSON only."""
 
         return loop.run_until_complete(self.classify(query, conversation_history))
 
-    def _fallback_classification(self, query: str) -> QueryAnalysis:
+    def _heuristic_classification(self, query: str) -> QueryAnalysis:
         """
-        Pattern-based fallback classification when LLM fails.
+        Fast pattern-based classification (< 1ms).
+
+        Uses regex patterns, query structure analysis, and word count
+        heuristics for reliable zero-latency classification.
 
         Args:
             query: The user's question.
@@ -207,27 +232,49 @@ Respond with JSON only."""
         Returns:
             QueryAnalysis based on heuristics.
         """
-        query_lower = query.lower()
+        query_lower = query.lower().strip()
+        word_count = len(query.split())
 
-        # Quick fact patterns
-        quick_patterns = [
-            "what is",
-            "what are",
-            "when",
-            "who",
-            "where",
-            "how much",
-            "how many",
-            "define",
-            "meaning of",
-            "list",
-            "name",
-            "give me",
-            "show me",
-            "tell me",
+        # --- Multi-hop patterns (check first — most specific) ---
+        multi_hop_patterns = [
+            r"relationship between",
+            r"how did.*lead to",
+            r"how does.*affect.*(?:and|while|considering)",
+            r"compare.*and.*in terms of",
+            r"implications of.*for",
+            r"what caused.*to",
+            r"connection between",
+            r"link between",
+            r"what is the.*between.*and",
+            r"how are.*and.*related",
+            r"trace the.*from.*to",
+            r"what role does.*play in",
+            r"how.*interact with",
+            r"combine.*with",
+            r"across.*(?:different|multiple|various)",
         ]
+        multi_hop_score = sum(1 for p in multi_hop_patterns if re.search(p, query_lower))
 
-        # In-depth patterns
+        # Multi-entity detection: queries mentioning 2+ distinct concepts with connectors
+        connector_words = [" and ", " vs ", " versus ", " or ", " while ", " whereas "]
+        connector_count = sum(1 for c in connector_words if c in query_lower)
+        if connector_count >= 1 and word_count > 15:
+            multi_hop_score += 1
+
+        # Question marks + sub-clauses suggest multi-step
+        if query.count("?") > 1:
+            multi_hop_score += 1
+
+        if multi_hop_score >= 1:
+            return QueryAnalysis(
+                intent=QueryIntent.MULTI_HOP,
+                confidence=0.75,
+                reasoning=f"Heuristic: {multi_hop_score} multi-hop indicator(s) detected",
+                keywords=query.split()[:5],
+                complexity_score=0.8,
+            )
+
+        # --- In-depth patterns ---
         depth_patterns = [
             "explain",
             "analyze",
@@ -238,6 +285,8 @@ Respond with JSON only."""
             "assess",
             "describe how",
             "why does",
+            "why is",
+            "why are",
             "what are the implications",
             "pros and cons",
             "comprehensive",
@@ -247,54 +296,75 @@ Respond with JSON only."""
             "how does",
             "impact of",
             "effect of",
+            "advantages and disadvantages",
+            "summarize",
+            "summarise",
+            "overview of",
+            "discuss",
+            "elaborate",
+            "what factors",
+            "what challenges",
+            "how can",
+            "how should",
+            "what steps",
         ]
-
-        multi_hop_patterns = [
-            r"relationship between",
-            r"how did.*lead to",
-            r"how does.*affect",
-            r"compare.*and.*in terms of",
-            r"implications of.*for",
-            r"what caused.*to",
-            r"connection between",
-            r"link between",
-        ]
-
-        # Check patterns
-        quick_score = sum(1 for p in quick_patterns if p in query_lower)
         depth_score = sum(1 for p in depth_patterns if p in query_lower)
-        multi_hop_score = sum(1 for p in multi_hop_patterns if re.search(p, query_lower))
 
-        # Also consider query length
-        word_count = len(query.split())
+        # Longer queries tend to be more complex
         if word_count > 20:
+            depth_score += 2
+        elif word_count > 12:
             depth_score += 1
 
-        if multi_hop_score > 0:
-            return QueryAnalysis(
-                intent=QueryIntent.MULTI_HOP,
-                confidence=0.6,
-                reasoning="Pattern-based fallback: detected multi-hop reasoning indicators",
-                keywords=query.split()[:5],
-                complexity_score=0.8,
-            )
+        # --- Quick fact patterns ---
+        quick_patterns = [
+            "what is",
+            "what are",
+            "when was",
+            "when did",
+            "when is",
+            "who is",
+            "who was",
+            "where is",
+            "where was",
+            "how much",
+            "how many",
+            "define",
+            "meaning of",
+            "list the",
+            "name the",
+            "give me",
+            "show me",
+            "tell me",
+            "is there",
+            "does it",
+            "do they",
+            "can you",
+            "what does",
+        ]
+        quick_score = sum(1 for p in quick_patterns if p in query_lower)
 
+        # Very short queries are almost always quick facts
+        if word_count <= 6:
+            quick_score += 2
+
+        # Decision
         if depth_score > quick_score:
             return QueryAnalysis(
                 intent=QueryIntent.IN_DEPTH,
-                confidence=0.6,
-                reasoning="Pattern-based fallback: detected complexity indicators",
+                confidence=0.7,
+                reasoning=f"Heuristic: depth_score={depth_score} > quick_score={quick_score}",
                 keywords=query.split()[:5],
-                complexity_score=0.7,
+                complexity_score=min(0.5 + depth_score * 0.1, 0.9),
             )
-        else:
-            return QueryAnalysis(
-                intent=QueryIntent.QUICK_FACT,
-                confidence=0.6,
-                reasoning="Pattern-based fallback: simple question structure",
-                keywords=query.split()[:5],
-                complexity_score=0.3,
-            )
+
+        return QueryAnalysis(
+            intent=QueryIntent.QUICK_FACT,
+            confidence=0.75,
+            reasoning=f"Heuristic: quick_score={quick_score} >= depth_score={depth_score}",
+            keywords=query.split()[:5],
+            complexity_score=max(0.3, min(0.1 + word_count * 0.02, 0.5)),
+        )
 
 
 # Singleton instance for convenience

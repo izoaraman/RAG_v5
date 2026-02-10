@@ -40,16 +40,16 @@ class DatabasePool:
     async def initialize(self) -> None:
         """Create connection pool with retry logic."""
         if not self._pool:
-            max_retries = 3
+            max_retries = 2
             for attempt in range(max_retries):
                 try:
                     self._pool = await asyncpg.create_pool(
                         self.database_url,
-                        min_size=2,
+                        min_size=1,
                         max_size=10,
-                        max_inactive_connection_lifetime=60,
-                        command_timeout=30,
-                        timeout=30,  # Connection timeout
+                        max_inactive_connection_lifetime=300,
+                        command_timeout=15,
+                        timeout=10,  # Connection timeout (reduced from 30s)
                     )
                     logger.info("Database connection pool initialized")
                     return
@@ -60,7 +60,7 @@ class DatabasePool:
                     if attempt < max_retries - 1:
                         import asyncio
 
-                        await asyncio.sleep(2**attempt)  # Exponential backoff
+                        await asyncio.sleep(1)  # Fast retry
                     else:
                         raise
 

@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from rag_crawler.router.state import RAGState, QueryIntent, format_sources_for_response
 from rag_crawler.agents.quick_fact_agent import get_quick_fact_prompt
 from rag_crawler.agents.in_depth_agent import get_in_depth_prompt
+from rag_crawler.utils.providers import get_shared_llm
 
 logger = logging.getLogger(__name__)
 
@@ -70,15 +71,8 @@ class ResponseGenerator:
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        # Initialize Azure OpenAI
-        self.llm = AzureChatOpenAI(
-            azure_deployment=self.model_name,
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        # Use shared LLM instance
+        self.llm = get_shared_llm(temperature=temperature)
 
         logger.info(f"ResponseGenerator initialized with model: {self.model_name}")
 

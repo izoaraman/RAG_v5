@@ -5,18 +5,16 @@ LogicRAG-inspired multi-hop reasoning agent for RAG_v5.
 import asyncio
 import json
 import logging
-import os
 from collections import defaultdict, deque
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import AzureChatOpenAI
-from pydantic import SecretStr
 
 from rag_crawler.retrieval.vector_retriever import VectorRetriever, create_retriever
 from rag_crawler.retrieval.reranker import BaseReranker, create_reranker
 from rag_crawler.retrieval.rolling_memory import RollingMemory
 from rag_crawler.router.state import RAGState, documents_to_state_format
+from rag_crawler.utils.providers import get_shared_llm
 
 logger = logging.getLogger(__name__)
 
@@ -58,14 +56,7 @@ class LogicRAGAgent:
         self.rerank_top_k = rerank_top_k
         self.threshold = threshold
 
-        self.model_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
-        self.llm = AzureChatOpenAI(
-            azure_deployment=self.model_name,
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            api_key=SecretStr(os.getenv("AZURE_OPENAI_API_KEY", "")),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
-            temperature=0.0,
-        )
+        self.llm = get_shared_llm(temperature=0.0)
 
         logger.info(
             "LogicRAGAgent initialized: "

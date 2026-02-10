@@ -2,14 +2,13 @@
 
 import json
 import logging
-import os
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import AzureChatOpenAI
-from pydantic import SecretStr
 
 from rag_crawler.utils.db_utils import store_document_summary
+from rag_crawler.utils.providers import get_shared_llm
 
 logger = logging.getLogger(__name__)
 
@@ -22,26 +21,10 @@ class DocumentSummarizer:
     context before drilling into specific chunks.
     """
 
-    def __init__(self, model_name: str | None = None, temperature: float = 0.0):
-        """Initialize summarizer configuration with lazy LLM setup."""
-        self.model_name = model_name or os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
-        self.temperature = temperature
-        self._llm: AzureChatOpenAI | None = None
-
-    @property
-    def llm(self) -> AzureChatOpenAI:
-        """Lazy-initialize Azure OpenAI client."""
-        if self._llm is None:
-            api_key = os.getenv("AZURE_OPENAI_API_KEY")
-            self._llm = AzureChatOpenAI(
-                azure_deployment=self.model_name,
-                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-                api_key=SecretStr(api_key) if api_key else None,
-                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
-                temperature=self.temperature,
-            )
-            logger.info(f"DocumentSummarizer initialized with model: {self.model_name}")
-        return self._llm
+    def __init__(self, llm: AzureChatOpenAI | None = None, temperature: float = 0.0):
+        """Initialize summarizer with shared LLM instance."""
+        self.llm = llm or get_shared_llm(temperature=temperature)
+        logger.info("DocumentSummarizer initialized")
 
     async def summarize_document(
         self, title: str, content: str, source: str = ""
