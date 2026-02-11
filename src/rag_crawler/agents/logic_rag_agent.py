@@ -384,7 +384,10 @@ class LogicRAGAgent:
             summary_contexts: list[str] = []
             try:
                 summaries = await self.retriever.retrieve_summaries(
-                    query=query, top_k=3, threshold=self.threshold
+                    query=query,
+                    top_k=3,
+                    threshold=self.threshold,
+                    source_filter=source_filter,
                 )
                 summary_contexts = [
                     f"[Document: {s['document_title']}] {s['summary']}" for s in summaries

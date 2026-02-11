@@ -2,7 +2,7 @@
 Azure AI Provider Configuration for RAG_v5.
 
 Centralized configuration for all Azure OpenAI services including:
-- Chat/Completion models (GPT-4o)
+- Chat/Completion models (GPT-4.1, GPT-4o)
 - Embedding models (text-embedding-3-small, ada-002)
 - Azure Database for PostgreSQL connection
 """
@@ -34,7 +34,7 @@ class AzureConfig:
         self.openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01")
 
         # Deployment names
-        self.chat_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
+        self.chat_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1")
         self.embedding_deployment = os.getenv(
             "AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small"
         )
@@ -200,7 +200,7 @@ ENV_TEMPLATE = """
 AZURE_OPENAI_API_KEY=your-azure-openai-key
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 AZURE_OPENAI_API_VERSION=2024-02-01
-AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o
+AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4.1
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-small
 
 # Azure Database for PostgreSQL

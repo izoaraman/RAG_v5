@@ -49,6 +49,7 @@ class DocumentIngestionPipeline:
         clean_before_ingest: bool = False,
         force_update: bool = False,
         source_prefix: str = "",
+        skip_summary: bool = False,
     ):
         """
         Initialize ingestion pipeline.
@@ -59,12 +60,14 @@ class DocumentIngestionPipeline:
             clean_before_ingest: Whether to clean ALL existing data (use with caution).
             force_update: Whether to re-ingest documents that already exist.
             source_prefix: Prefix to add to source paths (e.g., "new_uploads/" for filtering).
+            skip_summary: Whether to skip LLM summary generation (faster upload).
         """
         self.config = config
         self.documents_folder = documents_folder
         self.clean_before_ingest = clean_before_ingest
         self.force_update = force_update
         self.source_prefix = source_prefix
+        self.skip_summary = skip_summary
 
         # Initialize components
         self.chunker_config = ChunkingConfig(
@@ -346,17 +349,28 @@ class DocumentIngestionPipeline:
         )
 
         # Generate and store document summary (LogicRAG P2)
-        try:
-            await self.summarizer.summarize_and_store(
-                document_id=document_id,
-                title=document_title,
-                content=document_content,
-                source=document_source,
-                embedder=self.embedder,
-            )
-            logger.info(f"Generated summary for document: {document_title}")
-        except Exception as e:
-            logger.warning(f"Failed to generate summary for {document_title}: {e}")
+        if self.skip_summary:
+            logger.info(f"Skipping summary generation for: {document_title}")
+        else:
+            # Use timeout to prevent summarizer from blocking ingestion
+            try:
+                await asyncio.wait_for(
+                    self.summarizer.summarize_and_store(
+                        document_id=document_id,
+                        title=document_title,
+                        content=document_content,
+                        source=document_source,
+                        embedder=self.embedder,
+                    ),
+                    timeout=120,  # 2 minutes max for summary generation
+                )
+                logger.info(f"Generated summary for document: {document_title}")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Summary generation timed out for {document_title}, skipping summary"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to generate summary for {document_title}: {e}")
 
         logger.info(f"Saved document to PostgreSQL with ID: {document_id}")
 
@@ -420,17 +434,28 @@ class DocumentIngestionPipeline:
         )
 
         # Generate and store document summary (LogicRAG P2)
-        try:
-            await self.summarizer.summarize_and_store(
-                document_id=document_id,
-                title=title,
-                content=content,
-                source=url,
-                embedder=self.embedder,
-            )
-            logger.info(f"Generated summary for crawled page: {title}")
-        except Exception as e:
-            logger.warning(f"Failed to generate summary for {title}: {e}")
+        if self.skip_summary:
+            logger.info(f"Skipping summary generation for crawled page: {title}")
+        else:
+            # Use timeout to prevent summarizer from blocking ingestion
+            try:
+                await asyncio.wait_for(
+                    self.summarizer.summarize_and_store(
+                        document_id=document_id,
+                        title=title,
+                        content=content,
+                        source=url,
+                        embedder=self.embedder,
+                    ),
+                    timeout=120,  # 2 minutes max for summary generation
+                )
+                logger.info(f"Generated summary for crawled page: {title}")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Summary generation timed out for crawled page: {title}, skipping summary"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to generate summary for {title}: {e}")
 
         return IngestionResult(
             document_id=document_id,
@@ -727,6 +752,11 @@ def main() -> None:
         default="",
         help="Prefix to add to source paths (e.g., 'new_uploads/' for filtering)",
     )
+    parser.add_argument(
+        "--skip-summary",
+        action="store_true",
+        help="Skip LLM summary generation for faster ingestion",
+    )
 
     args = parser.parse_args()
 
@@ -749,6 +779,7 @@ def main() -> None:
         clean_before_ingest=args.clean,
         force_update=args.force_update,
         source_prefix=args.source_prefix,
+        skip_summary=args.skip_summary,
     )
 
     def progress_callback(current: int, total: int) -> None:

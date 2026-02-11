@@ -29,7 +29,7 @@ class InDepthAgent:
         reranker: BaseReranker | None = None,
         retrieval_top_k: int = 10,
         final_top_k: int = 5,
-        threshold: float = 0.4,
+        threshold: float = 0.3,
     ):
         """
         Initialize In-Depth Agent.

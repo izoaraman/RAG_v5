@@ -2,15 +2,32 @@
 
 import json
 import logging
+import os
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import AzureChatOpenAI
+from pydantic import SecretStr
 
 from rag_crawler.utils.db_utils import store_document_summary
-from rag_crawler.utils.providers import get_shared_llm
 
 logger = logging.getLogger(__name__)
+
+
+def _get_summarizer_llm(temperature: float = 0.0) -> AzureChatOpenAI:
+    """Get a lightweight LLM for summarization (gpt-4.1-mini by default)."""
+    api_key = os.getenv("AZURE_OPENAI_API_KEY", "")
+    # Use gpt-4.1-mini for summarization — faster and cheaper than gpt-4.1
+    deployment = os.getenv("AZURE_OPENAI_SUMMARIZER_DEPLOYMENT")
+    if not deployment:
+        deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1")
+    return AzureChatOpenAI(
+        azure_deployment=deployment,
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_key=SecretStr(api_key) if api_key else None,
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
+        temperature=temperature,
+    )
 
 
 class DocumentSummarizer:
@@ -22,8 +39,8 @@ class DocumentSummarizer:
     """
 
     def __init__(self, llm: AzureChatOpenAI | None = None, temperature: float = 0.0):
-        """Initialize summarizer with shared LLM instance."""
-        self.llm = llm or get_shared_llm(temperature=temperature)
+        """Initialize summarizer with lightweight LLM (gpt-4.1-mini)."""
+        self.llm = llm or _get_summarizer_llm(temperature=temperature)
         logger.info("DocumentSummarizer initialized")
 
     async def summarize_document(

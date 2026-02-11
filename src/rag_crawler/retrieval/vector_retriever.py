@@ -158,41 +158,54 @@ class VectorRetriever:
         query: str,
         top_k: int = 3,
         threshold: float = 0.3,
+        source_filter: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Retrieve document-level summaries for warm-up retrieval.
 
         Used by LogicRAG agent for broad document-level context
         before drilling into specific chunks.
+
+        Args:
+            query: Search query.
+            top_k: Number of summaries to return.
+            threshold: Minimum similarity threshold.
+            source_filter: Optional source path prefix (e.g., "new_uploads/").
         """
         await self.initialize()
 
         query_embedding = await self.embedder.embed_query(query)
         embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
 
+        base_query = """
+            SELECT
+                ds.id::text AS summary_id,
+                ds.document_id::text,
+                ds.summary,
+                ds.key_entities,
+                ds.key_topics,
+                d.title AS document_title,
+                d.source AS document_source,
+                1 - (ds.embedding <=> $1::vector) AS score
+            FROM document_summaries ds
+            JOIN documents d ON ds.document_id = d.id
+            WHERE ds.embedding IS NOT NULL
+            AND 1 - (ds.embedding <=> $1::vector) >= $2
+        """
+        params: list[Any] = [embedding_str, threshold]
+
+        # Apply source filter if provided (for "New document" mode)
+        if source_filter:
+            param_idx = len(params) + 1
+            base_query += f" AND d.source LIKE ${param_idx}"
+            params.append(f"{source_filter}%")
+
+        param_idx = len(params) + 1
+        base_query += f" ORDER BY ds.embedding <=> $1::vector LIMIT ${param_idx}"
+        params.append(top_k)
+
         async with db_pool.acquire() as conn:
-            results = await conn.fetch(
-                """
-                SELECT
-                    ds.id::text AS summary_id,
-                    ds.document_id::text,
-                    ds.summary,
-                    ds.key_entities,
-                    ds.key_topics,
-                    d.title AS document_title,
-                    d.source AS document_source,
-                    1 - (ds.embedding <=> $1::vector) AS score
-                FROM document_summaries ds
-                JOIN documents d ON ds.document_id = d.id
-                WHERE ds.embedding IS NOT NULL
-                AND 1 - (ds.embedding <=> $1::vector) >= $2
-                ORDER BY ds.embedding <=> $1::vector
-                LIMIT $3
-                """,
-                embedding_str,
-                threshold,
-                top_k,
-            )
+            results = await conn.fetch(base_query, *params)
 
             return [
                 {

@@ -242,11 +242,27 @@ def init_session_state():
     if "rag_option" not in st.session_state:
         st.session_state.rag_option = "Current documents"
     if "temperature" not in st.session_state:
-        st.session_state.temperature = 0.0
+        st.session_state.temperature = 0.2
     if "debug_mode" not in st.session_state:
         st.session_state.debug_mode = False
     if "uploaded_file_names" not in st.session_state:
         st.session_state.uploaded_file_names = []
+    # Background crawler state
+    if "crawler_process" not in st.session_state:
+        st.session_state.crawler_process = None  # subprocess.Popen handle
+    if "crawler_start_time" not in st.session_state:
+        st.session_state.crawler_start_time = None  # datetime when crawl started
+    if "crawler_url" not in st.session_state:
+        st.session_state.crawler_url = ""  # URL being crawled
+    if "crawler_status" not in st.session_state:
+        st.session_state.crawler_status = "idle"  # idle | crawling | ingesting | done | error
+    if "crawler_message" not in st.session_state:
+        st.session_state.crawler_message = ""  # Status/error message
+    if "crawler_timeout" not in st.session_state:
+        st.session_state.crawler_timeout = 600  # 10 minutes default
+    # Background ingestion state (for crawl results)
+    if "ingest_process" not in st.session_state:
+        st.session_state.ingest_process = None  # subprocess.Popen handle for ingestion
 
 
 init_session_state()
@@ -470,12 +486,17 @@ def handle_document_upload(uploaded_files, save_dir: Path) -> list:
     return saved_files
 
 
-def run_ingestion(documents_dir: str | None = None, source_prefix: str = "") -> tuple[bool, str]:
+def run_ingestion(
+    documents_dir: str | None = None,
+    source_prefix: str = "",
+    skip_summary: bool = False,
+) -> tuple[bool, str]:
     """Run document ingestion.
 
     Args:
         documents_dir: Directory containing documents.
         source_prefix: Prefix to add to source paths (e.g., "new_uploads/").
+        skip_summary: Skip LLM summary generation for faster upload.
     """
     try:
         cmd = ["uv", "run", "rag-ingest"]
@@ -487,71 +508,180 @@ def run_ingestion(documents_dir: str | None = None, source_prefix: str = "") -> 
         if source_prefix:
             cmd.extend(["--source-prefix", source_prefix])
 
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT), timeout=300)
+        if skip_summary:
+            cmd.append("--skip-summary")
+
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT), timeout=600)
         if result.returncode == 0:
             return True, "Documents ingested successfully!"
         else:
             return False, f"Ingestion failed: {result.stderr[:200]}"
-    except Exception as e:
-        return False, f"Error: {str(e)}"
-
-
-def run_crawler(url: str, max_pages: int = 50) -> tuple[bool, str, str | None]:
-    """Run the RAG crawler on a URL.
-
-    Returns:
-        Tuple of (success, message, json_report_path or None).
-    """
-    try:
-        # Find or create output directory
-        output_dir = ROOT / "output"
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Get list of existing JSON reports before crawl
-        existing_reports = set(output_dir.glob("crawl_report_*.json"))
-
-        cmd = ["uv", "run", "rag-crawler", "--url", url, "--max-pages", str(max_pages)]
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT), timeout=600)
-
-        if result.returncode == 0:
-            # Find the new JSON report (created after crawl)
-            new_reports = set(output_dir.glob("crawl_report_*.json")) - existing_reports
-            if new_reports:
-                report_path = max(new_reports, key=lambda p: p.stat().st_mtime)
-                return True, f"Successfully crawled {url}", str(report_path)
-            else:
-                # Fallback: find most recent JSON report
-                all_reports = list(output_dir.glob("crawl_report_*.json"))
-                if all_reports:
-                    report_path = max(all_reports, key=lambda p: p.stat().st_mtime)
-                    return True, f"Successfully crawled {url}", str(report_path)
-                return True, f"Successfully crawled {url}", None
-        else:
-            return False, f"Crawler failed: {result.stderr[:200]}", None
     except subprocess.TimeoutExpired:
-        return False, "Crawler timed out after 10 minutes", None
-    except Exception as e:
-        return False, f"Error: {str(e)}", None
-
-
-def run_crawl_ingestion(report_path: str) -> tuple[bool, str]:
-    """Ingest documents from a crawl report.
-
-    Args:
-        report_path: Path to the crawler JSON report.
-
-    Returns:
-        Tuple of (success, message).
-    """
-    try:
-        cmd = ["uv", "run", "rag-ingest", "--crawl-report", report_path]
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT), timeout=300)
-        if result.returncode == 0:
-            return True, "Crawled content ingested successfully!"
-        else:
-            return False, f"Ingestion failed: {result.stderr[:200]}"
+        return False, "Ingestion timed out after 10 minutes. Try uploading a smaller document."
     except Exception as e:
         return False, f"Error: {str(e)}"
+
+
+def start_crawler_background(url: str, max_pages: int = 10) -> None:
+    """Start the RAG crawler as a non-blocking background process.
+
+    Updates st.session_state with process handle and status.
+    """
+    output_dir = ROOT / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Record existing reports to detect new ones later
+    st.session_state._crawler_existing_reports = set(
+        str(p) for p in output_dir.glob("crawl_report_*.json")
+    )
+
+    cmd = ["uv", "run", "rag-crawler", "--url", url, "--max-pages", str(max_pages)]
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(ROOT),
+        )
+        st.session_state.crawler_process = process
+        st.session_state.crawler_start_time = datetime.now()
+        st.session_state.crawler_url = url
+        st.session_state.crawler_status = "crawling"
+        st.session_state.crawler_message = ""
+    except Exception as e:
+        st.session_state.crawler_status = "error"
+        st.session_state.crawler_message = f"Failed to start crawler: {e}"
+
+
+def start_ingestion_background(report_path: str) -> None:
+    """Start crawl ingestion as a non-blocking background process."""
+    cmd = ["uv", "run", "rag-ingest", "--crawl-report", report_path]
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(ROOT),
+        )
+        st.session_state.ingest_process = process
+        st.session_state.crawler_status = "ingesting"
+        st.session_state.crawler_message = ""
+    except Exception as e:
+        st.session_state.crawler_status = "error"
+        st.session_state.crawler_message = f"Failed to start ingestion: {e}"
+
+
+def _find_new_crawl_report() -> str | None:
+    """Find the new crawl report created by the background crawler."""
+    output_dir = ROOT / "output"
+    existing = st.session_state.get("_crawler_existing_reports", set())
+    current_reports = set(str(p) for p in output_dir.glob("crawl_report_*.json"))
+    new_reports = current_reports - existing
+    if new_reports:
+        # Return the most recently modified new report
+        return max(new_reports, key=lambda p: Path(p).stat().st_mtime)
+    # Fallback: most recent report
+    all_reports = list(output_dir.glob("crawl_report_*.json"))
+    if all_reports:
+        return str(max(all_reports, key=lambda p: p.stat().st_mtime))
+    return None
+
+
+def poll_crawler_status() -> None:
+    """Poll background crawler/ingestion processes. Call on every Streamlit rerun.
+
+    Handles transitions: crawling → ingesting → done, plus timeout enforcement.
+    """
+    status = st.session_state.crawler_status
+
+    # --- Phase 1: Crawling ---
+    if status == "crawling" and st.session_state.crawler_process is not None:
+        proc = st.session_state.crawler_process
+        elapsed = (datetime.now() - st.session_state.crawler_start_time).total_seconds()
+
+        # Check timeout
+        if elapsed > st.session_state.crawler_timeout:
+            proc.kill()
+            proc.wait()
+            timeout_min = st.session_state.crawler_timeout // 60
+            st.session_state.crawler_process = None
+            st.session_state.crawler_status = "error"
+            st.session_state.crawler_message = (
+                f"Crawler timed out after {timeout_min} minutes. "
+                f"Try reducing 'Max Pages' or using a more specific URL."
+            )
+            return
+
+        # Check if process finished
+        retcode = proc.poll()
+        if retcode is not None:
+            st.session_state.crawler_process = None
+            if retcode == 0:
+                # Crawl succeeded → find report → start ingestion
+                report_path = _find_new_crawl_report()
+                if report_path:
+                    start_ingestion_background(report_path)
+                else:
+                    st.session_state.crawler_status = "error"
+                    st.session_state.crawler_message = "Crawl completed but no report file found."
+            else:
+                stderr = proc.stderr.read() if proc.stderr else ""
+                st.session_state.crawler_status = "error"
+                st.session_state.crawler_message = (
+                    f"Crawler failed: {stderr[:300]}" if stderr else "Crawler failed"
+                )
+
+    # --- Phase 2: Ingesting ---
+    elif status == "ingesting" and st.session_state.ingest_process is not None:
+        proc = st.session_state.ingest_process
+        elapsed = (datetime.now() - st.session_state.crawler_start_time).total_seconds()
+
+        # Ingestion timeout (same as crawler timeout)
+        if elapsed > st.session_state.crawler_timeout + 600:  # extra 10 min for ingestion
+            proc.kill()
+            proc.wait()
+            st.session_state.ingest_process = None
+            st.session_state.crawler_status = "error"
+            st.session_state.crawler_message = "Ingestion timed out."
+            return
+
+        retcode = proc.poll()
+        if retcode is not None:
+            st.session_state.ingest_process = None
+            if retcode == 0:
+                st.session_state.crawler_status = "done"
+                st.session_state.crawler_message = (
+                    f"Successfully crawled and ingested {st.session_state.crawler_url}"
+                )
+                # Auto-switch to "Current documents" so crawled content is queryable
+                if st.session_state.rag_option != "Current documents":
+                    st.session_state.rag_option = "Current documents"
+            else:
+                stderr = proc.stderr.read() if proc.stderr else ""
+                st.session_state.crawler_status = "error"
+                st.session_state.crawler_message = (
+                    f"Ingestion failed: {stderr[:300]}" if stderr else "Ingestion failed"
+                )
+
+
+def stop_crawler() -> None:
+    """Kill the background crawler/ingestion process."""
+    for key in ("crawler_process", "ingest_process"):
+        proc = st.session_state.get(key)
+        if proc is not None:
+            try:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
+            st.session_state[key] = None
+
+    st.session_state.crawler_status = "idle"
+    st.session_state.crawler_start_time = None
+    st.session_state.crawler_url = ""
+    st.session_state.crawler_message = ""
 
 
 # ---------- CONFIG CHECK ----------
@@ -590,6 +720,43 @@ def check_database_connection() -> tuple[bool, str]:
             return False, "Cannot connect to database. Add your IP to Azure PostgreSQL firewall."
     except Exception as e:
         return False, f"Database check failed: {str(e)}"
+
+
+# ---------- CRAWLER STATUS FRAGMENT ----------
+@st.fragment(run_every=5)
+def _render_crawler_status():
+    """Auto-refreshing fragment that shows crawler status and handles transitions."""
+    # Re-poll on each fragment refresh
+    poll_crawler_status()
+
+    status = st.session_state.crawler_status
+    crawler_active = status in ("crawling", "ingesting")
+
+    if crawler_active and st.session_state.crawler_start_time:
+        elapsed = (datetime.now() - st.session_state.crawler_start_time).total_seconds()
+        elapsed_min = int(elapsed // 60)
+        elapsed_sec = int(elapsed % 60)
+        phase = "Crawling" if status == "crawling" else "Ingesting"
+        timeout_min = st.session_state.crawler_timeout // 60
+        st.info(
+            f"**{phase}** {st.session_state.crawler_url}\n\n"
+            f"⏱ {elapsed_min}m {elapsed_sec}s elapsed "
+            f"(timeout: {timeout_min}m)"
+        )
+    elif status == "done":
+        st.success(st.session_state.crawler_message)
+        if st.session_state.rag_option == "Current documents":
+            st.caption(
+                "Mode set to **Current documents** — crawled content is available in this mode."
+            )
+        if st.button("Dismiss", key="crawler_dismiss_done", type="tertiary"):
+            st.session_state.crawler_status = "idle"
+            st.rerun()
+    elif status == "error":
+        st.error(st.session_state.crawler_message)
+        if st.button("Dismiss", key="crawler_dismiss_error", type="tertiary"):
+            st.session_state.crawler_status = "idle"
+            st.rerun()
 
 
 # ---------- MAIN APP ----------
@@ -658,7 +825,9 @@ def main():
                 source_prefix = (
                     "new_uploads/" if st.session_state.rag_option == "New document" else ""
                 )
-                success, message = run_ingestion(str(save_dir), source_prefix=source_prefix)
+                success, message = run_ingestion(
+                    str(save_dir), source_prefix=source_prefix, skip_summary=True
+                )
                 if success:
                     st.success(message)
                 else:
@@ -668,39 +837,40 @@ def main():
 
         # URL Crawler Section
         st.markdown("#### Crawl Website")
+
+        crawler_active = st.session_state.crawler_status in ("crawling", "ingesting")
+
         crawler_url = st.text_input(
             "Website URL",
             placeholder="https://example.com",
             help="Enter a URL to crawl and ingest into the knowledge base",
+            disabled=crawler_active,
         )
         crawler_max_pages = st.number_input(
             "Max Pages",
             min_value=1,
             max_value=500,
-            value=50,
-            help="Maximum number of pages to crawl",
+            value=10,
+            help="Maximum number of pages to crawl (lower = faster)",
+            disabled=crawler_active,
         )
 
-        if st.button("Run Crawler", use_container_width=True, type="secondary"):
-            if crawler_url:
-                with st.spinner(f"Crawling {crawler_url}..."):
-                    success, message, report_path = run_crawler(crawler_url, crawler_max_pages)
-                    if success:
-                        st.success(message)
-                        # Auto-ingest crawled content using the report
-                        if report_path:
-                            with st.spinner("Ingesting crawled content..."):
-                                ingest_success, ingest_msg = run_crawl_ingestion(report_path)
-                                if ingest_success:
-                                    st.success("Content ingested!")
-                                else:
-                                    st.warning(ingest_msg)
-                        else:
-                            st.warning("Crawl report not found. Run manual ingestion.")
-                    else:
-                        st.error(message)
-            else:
-                st.warning("Please enter a URL")
+        if not crawler_active:
+            # Show Run button
+            if st.button("Run Crawler", use_container_width=True, type="secondary"):
+                if crawler_url:
+                    start_crawler_background(crawler_url, crawler_max_pages)
+                    st.rerun()
+                else:
+                    st.warning("Please enter a URL")
+        else:
+            # Show Stop button + status
+            if st.button("Stop Crawler", use_container_width=True, type="primary"):
+                stop_crawler()
+                st.rerun()
+
+        # Crawler status display (auto-refreshing fragment)
+        _render_crawler_status()
 
         st.divider()
 

@@ -18,6 +18,7 @@ from rag_crawler.agents.in_depth_agent import InDepthAgent
 from rag_crawler.agents.logic_rag_agent import LogicRAGAgent
 from rag_crawler.agents.response_generator import ResponseGenerator
 from rag_crawler.retrieval.memory import ConversationMemory, SessionMemoryManager
+from rag_crawler.retrieval.reranker import create_reranker
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +36,18 @@ class RAGRouter:
 
     def __init__(self):
         """Initialize RAG Router with all components."""
-        # Initialize agents
+        # Shared reranker instance — loaded once, used by both InDepth and LogicRAG
+        try:
+            shared_reranker = create_reranker("hybrid")
+        except Exception as e:
+            logger.warning(f"Hybrid reranker unavailable, using basic: {e}")
+            shared_reranker = create_reranker("basic")
+
+        # Initialize agents (sharing reranker to avoid duplicate model loads)
         self.classifier = QueryClassifier()
         self.quick_fact_agent = QuickFactAgent()
-        self.in_depth_agent = InDepthAgent()
-        self.logic_rag_agent = LogicRAGAgent()
+        self.in_depth_agent = InDepthAgent(reranker=shared_reranker)
+        self.logic_rag_agent = LogicRAGAgent(reranker=shared_reranker)
         self.response_generator = ResponseGenerator()
 
         # Session management

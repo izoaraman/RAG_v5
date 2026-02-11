@@ -82,7 +82,7 @@ class QueryClassifier:
             temperature: LLM temperature (lower = more deterministic).
             use_llm: Whether to use LLM for classification (default: False for speed).
         """
-        self.model_name = model_name or os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
+        self.model_name = model_name or os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1")
         self.temperature = temperature
         self.use_llm = use_llm
 
@@ -265,11 +265,16 @@ Respond with JSON only."""
         if query.count("?") > 1:
             multi_hop_score += 1
 
-        if multi_hop_score >= 1:
+        # Require stronger evidence for multi-hop on short queries
+        # Short questions like "what is the relationship between X and Y?"
+        # are usually in-depth, not multi-hop
+        multi_hop_threshold = 1 if word_count >= 15 else 2
+
+        if multi_hop_score >= multi_hop_threshold:
             return QueryAnalysis(
                 intent=QueryIntent.MULTI_HOP,
                 confidence=0.75,
-                reasoning=f"Heuristic: {multi_hop_score} multi-hop indicator(s) detected",
+                reasoning=f"Heuristic: {multi_hop_score} multi-hop indicator(s), threshold={multi_hop_threshold}",
                 keywords=query.split()[:5],
                 complexity_score=0.8,
             )

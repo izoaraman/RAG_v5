@@ -24,7 +24,7 @@ def get_shared_llm(temperature: float = 0.0) -> AzureChatOpenAI:
     if _shared_llm is None:
         api_key = os.getenv("AZURE_OPENAI_API_KEY", "")
         _shared_llm = AzureChatOpenAI(
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o"),
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1"),
             azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
             api_key=SecretStr(api_key) if api_key else None,
             api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),

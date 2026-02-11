@@ -20,29 +20,18 @@ from rag_crawler.utils.providers import get_shared_llm
 logger = logging.getLogger(__name__)
 
 
-# System prompt for RAG responses
+# System prompt for RAG responses (used at all temperature levels)
 RAG_SYSTEM_PROMPT = """You are a knowledgeable assistant that provides accurate, well-sourced answers based on the provided context.
 
 Key guidelines:
 - Base your answer on the provided context documents
-- Use citation numbers [1], [2], etc. when referencing specific sources
-- If the context doesn't contain enough information, say so
-- Be accurate and don't make up information
-- Match your response length and style to the question type
-- Be helpful and professional
-"""
-
-# Strict system prompt for temperature=0 (factual mode)
-RAG_SYSTEM_PROMPT_STRICT = """You are a precise, factual assistant. You answer based on the provided context documents.
-
-RULES:
-- Base your answer on information from the provided context documents
 - Do NOT add information from your own knowledge or training data
 - Use citation numbers [1], [2], etc. when referencing specific sources
 - Answer as thoroughly as the context allows — extract and synthesise relevant details even if the context is indirect
 - If the context only partially addresses the question, answer what you can and briefly note what is not covered
 - Only say you cannot answer if the context is truly unrelated to the question
-- Be concise and factual
+- Match your response length and style to the question type
+- Be helpful, accurate, and professional
 """
 
 
@@ -67,7 +56,7 @@ class ResponseGenerator:
             temperature: LLM temperature for response generation.
             max_tokens: Maximum tokens in response.
         """
-        self.model_name = model_name or os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
+        self.model_name = model_name or os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1")
         self.temperature = temperature
         self.max_tokens = max_tokens
 
@@ -110,16 +99,15 @@ class ResponseGenerator:
                 )
 
             # Use temperature from state (set by user's Answer Style slider)
-            user_temperature = state.get("temperature", 0.0)
-            is_strict_mode = user_temperature == 0.0
+            user_temperature = state.get("temperature", 0.2)
 
             # Generate appropriate prompt
             if current_agent == "quick_fact" or intent == QueryIntent.QUICK_FACT:
                 prompt = get_quick_fact_prompt(query, documents)
-                temperature = user_temperature if not is_strict_mode else 0.0
             else:
                 prompt = get_in_depth_prompt(query, documents, use_framework=True)
-                temperature = user_temperature if not is_strict_mode else 0.0
+
+            temperature = user_temperature
 
             # Enhance prompt with LogicRAG rolling memory context
             info_summary = state.get("info_summary", "")
@@ -135,8 +123,8 @@ class ResponseGenerator:
             # Set temperature on LLM
             self.llm.temperature = temperature
 
-            # Select system prompt based on strictness
-            system_prompt = RAG_SYSTEM_PROMPT_STRICT if is_strict_mode else RAG_SYSTEM_PROMPT
+            # Use balanced system prompt at all temperature levels
+            system_prompt = RAG_SYSTEM_PROMPT
 
             # Include conversation history if available
             conversation_history = state.get("conversation_history", [])
