@@ -87,7 +87,22 @@ html, body, [data-testid="stAppViewContainer"], .main {background: #ffffff;}
 .app-header {background: var(--violet); padding: 0.6rem 0.8rem; border-radius: 10px;}
 .app-header h1 {color: #fff; margin: 0; font-weight: 700; font-size: 1.4rem;}
 
-.answer-card {padding: 0.9rem; border-radius: 10px; border: 1px solid #E6F7F6; background: #FFFFFF;}
+.answer-card {
+    padding: 0.2rem 0;
+    color: #1a1a2e;
+    font-size: 15px;
+    line-height: 1.7;
+}
+.answer-card p { margin: 0 0 0.6em 0; }
+.answer-card ul, .answer-card ol { margin: 0.3em 0 0.6em 1.4em; padding: 0; }
+.answer-card li { margin-bottom: 0.25em; }
+.answer-card strong { font-weight: 600; }
+.answer-card h1, .answer-card h2, .answer-card h3 {
+    margin: 0.8em 0 0.3em 0;
+    color: var(--navy);
+    font-weight: 700;
+}
+.answer-card h3 { font-size: 1.05em; }
 .sources-card {padding: 0.9rem; border-radius: 10px; border: 1px solid #CBEFED; background: #F7FFFE;}
 
 .citation-link {
@@ -160,12 +175,12 @@ html, body, [data-testid="stAppViewContainer"], .main {background: #ffffff;}
     margin-right: 8px;
 }
 
-.stButton button, button[kind="primary"], [data-testid="baseButton-primary"] {
+.stButton button:not([kind="tertiary"]), button[kind="primary"], [data-testid="baseButton-primary"] {
     background: var(--opal) !important;
     color: var(--navy) !important;
     border: 1px solid var(--opal) !important;
 }
-.stButton button:hover, button[kind="primary"]:hover {
+.stButton button:not([kind="tertiary"]):hover, button[kind="primary"]:hover {
     background: #18bab4 !important;
     border-color: var(--violet) !important;
 }
@@ -198,6 +213,21 @@ button[kind="secondary"] {
     color: #6b7280;
     font-weight: bold;
 }
+/* Sources button — light grey */
+[data-testid="stBaseButton-tertiary"] {
+    color: #b0b0b0 !important;
+    font-size: 0.8rem !important;
+    background: transparent !important;
+    border: none !important;
+    padding: 2px 0 !important;
+    box-shadow: none !important;
+}
+[data-testid="stBaseButton-tertiary"]:hover {
+    color: #888 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -209,10 +239,6 @@ def init_session_state():
         st.session_state.chat_history = []
     if "session_id" not in st.session_state:
         st.session_state.session_id = str(uuid.uuid4())
-    if "references_last" not in st.session_state:
-        st.session_state.references_last = []
-    if "answer_last" not in st.session_state:
-        st.session_state.answer_last = ""
     if "rag_option" not in st.session_state:
         st.session_state.rag_option = "Current documents"
     if "temperature" not in st.session_state:
@@ -267,7 +293,15 @@ def process_query(query: str, temperature: float = 0.0, source_filter: str | Non
 
 # ---------- CITATION & SOURCE RENDERING ----------
 def make_citations_clickable(text: str) -> str:
-    escaped_text = html.escape(text)
+    """Inject clickable citation links into response text.
+
+    Keeps the original markdown intact so Streamlit renders it natively.
+    Only citation brackets like [1], [2-3] become HTML links.
+    Bold markers (**text**) are stripped for a clean, uniform look.
+    """
+    # Strip bold markers
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+
     citation_pattern = r"\[(\d+(?:-\d+)?(?:\]\[\d+(?:-\d+)?)*)\]"
 
     def replace_citation(match):
@@ -275,15 +309,10 @@ def make_citations_clickable(text: str) -> str:
         numbers = re.findall(r"\d+", citation_text)
         if numbers:
             first_number = numbers[0]
-            return f'<a href="#source-{first_number}" class="citation-link" data-source="{first_number}" title="View source {first_number}">{citation_text}</a>'
+            return f'<a class="citation-link" title="Source {first_number}">{citation_text}</a>'
         return citation_text
 
-    return re.sub(citation_pattern, replace_citation, escaped_text)
-
-
-def extract_cited_numbers(answer_text: str) -> list:
-    citation_pattern = r"\[(\d+)\]"
-    return sorted(set(int(m) for m in re.findall(citation_pattern, answer_text)))
+    return re.sub(citation_pattern, replace_citation, text)
 
 
 def _resolve_source_file(doc_source: str) -> Path | None:
@@ -311,7 +340,7 @@ def _resolve_source_file(doc_source: str) -> Path | None:
     return None
 
 
-def render_sources_detailed(sources: list):
+def render_sources_detailed(sources: list, key_prefix: str = "detail"):
     """Render sources in detailed card format with links to originals."""
     if not sources:
         st.info("No source documents found for this query.")
@@ -376,35 +405,55 @@ def render_sources_detailed(sources: list):
                     label=f"Download {file_path.name}",
                     data=file_data,
                     file_name=file_path.name,
-                    key=f"download_source_{i}",
+                    key=f"download_{key_prefix}_{i}",
                 )
 
 
-def render_sources_compact(sources: list, answer_text: str):
-    """Render compact source list below answer."""
+def render_sources_inline(sources: list, button_key: str):
+    """Brief unique-document list with a muted 'View details' button."""
     if not sources:
         return
 
-    cited_numbers = extract_cited_numbers(answer_text)
-    if not cited_numbers:
+    # Deduplicate by document title, preserving order
+    seen = set()
+    unique_titles = []
+    for src in sources:
+        title = (
+            src.get("document_title", src.get("title", ""))
+            if isinstance(src, dict)
+            else getattr(src, "document_title", "")
+        )
+        if title and title not in seen:
+            seen.add(title)
+            unique_titles.append(title)
+
+    if not unique_titles:
         return
 
-    st.markdown("**Sources:**")
-    sources_html = '<div class="sources-list">'
+    items = "".join(
+        f'<div class="source-item"><span class="source-number">{i}.</span> {html.escape(t)}</div>'
+        for i, t in enumerate(unique_titles, 1)
+    )
+    st.markdown(
+        f'<div class="sources-list" style="padding:8px 12px;margin-top:6px;">{items}</div>',
+        unsafe_allow_html=True,
+    )
 
-    for i, source in enumerate(sources, 1):
-        if i not in cited_numbers:
-            continue
+    if st.button(
+        "Sources",
+        key=button_key,
+        type="tertiary",
+    ):
+        show_sources_dialog(sources)
 
-        if isinstance(source, dict):
-            doc_title = source.get("document_title", source.get("title", f"Source {i}"))
-        else:
-            doc_title = getattr(source, "document_title", f"Source {i}")
 
-        sources_html += f'<div class="source-item" id="source-{i}"><span class="source-number">[{i}]</span> {html.escape(doc_title)}</div>'
-
-    sources_html += "</div>"
-    st.markdown(sources_html, unsafe_allow_html=True)
+@st.dialog("Document Sources", width="large")
+def show_sources_dialog(sources):
+    """Show detailed sources in a native Streamlit dialog."""
+    if not sources:
+        st.info("No source documents found.")
+        return
+    render_sources_detailed(sources)
 
 
 # ---------- DOCUMENT & CRAWLER FUNCTIONS ----------
@@ -681,8 +730,6 @@ def main():
         if st.button("Clear Chat", use_container_width=True, type="secondary"):
             st.session_state.chat_history = []
             st.session_state.session_id = str(uuid.uuid4())
-            st.session_state.references_last = []
-            st.session_state.answer_last = ""
             st.rerun()
 
         # Quick Guide
@@ -711,15 +758,12 @@ DATABASE_URL=postgresql://user:pass@server:5432/db?sslmode=require
     # Chat container
     chat_container = st.container()
     with chat_container:
-        for message in st.session_state.chat_history:
+        for i, message in enumerate(st.session_state.chat_history):
             _avatar = AVATAR_ASSISTANT if message["role"] == "assistant" else AVATAR_USER
             with st.chat_message(message["role"], avatar=_avatar):
                 if message["role"] == "assistant":
                     clickable_content = make_citations_clickable(message["content"])
-                    st.markdown(
-                        f'<div class="answer-card">{clickable_content}</div>',
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown(clickable_content, unsafe_allow_html=True)
                     # Show agent badge for LogicRAG multi-hop queries (persisted)
                     agent_used = message.get("agent_used", "")
                     if agent_used == "logic_rag":
@@ -730,57 +774,12 @@ DATABASE_URL=postgresql://user:pass@server:5432/db?sslmode=require
                             f"Multi-hop reasoning | {round_count} rounds | "
                             f"{len(subproblems)} sub-problems"
                         )
-                    # Show compact sources below answer (persisted)
+                    # Inline source list + details button
                     sources = message.get("sources", [])
                     if sources:
-                        render_sources_compact(sources, message["content"])
+                        render_sources_inline(sources, f"sources_history_{i}")
                 else:
                     st.markdown(message["content"])
-
-    # ========== SOURCE SECTION ==========
-    if st.session_state.chat_history:
-        st.markdown("---")
-
-        # JavaScript for citation click handling
-        st.markdown(
-            """
-        <script>
-        document.addEventListener('click', function(e) {
-            if (e.target && e.target.classList && e.target.classList.contains('citation-link')) {
-                e.preventDefault();
-                const sourceNum = e.target.getAttribute('data-source');
-                if (sourceNum) {
-                    const sourceElement = document.querySelector('#source-' + sourceNum);
-                    if (sourceElement) {
-                        sourceElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        sourceElement.style.transition = 'all 0.3s ease';
-                        sourceElement.style.backgroundColor = '#e6f9f7';
-                        sourceElement.style.border = '2px solid #1CCFC9';
-                        setTimeout(() => {
-                            sourceElement.style.backgroundColor = '';
-                            sourceElement.style.border = '';
-                        }, 2500);
-                    }
-                }
-            }
-        });
-        </script>
-        """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown("### Source")
-
-        if st.session_state.references_last:
-            st.markdown("*Click on citations [1], [2] in the answer to jump to sources*")
-            st.markdown(
-                '<div style="max-height: 600px; overflow-y: auto; padding: 1rem;">',
-                unsafe_allow_html=True,
-            )
-            render_sources_detailed(st.session_state.references_last)
-            st.markdown("</div>", unsafe_allow_html=True)
-        else:
-            st.info("No sources available. Sources will appear here after you ask a question.")
 
     # ========== CHAT INPUT ==========
     if prompt := st.chat_input("Ask a question about your documents..."):
@@ -805,9 +804,7 @@ DATABASE_URL=postgresql://user:pass@server:5432/db?sslmode=require
                 agent_used = result.get("agent_used", "unknown")
 
                 clickable_response = make_citations_clickable(response)
-                st.markdown(
-                    f'<div class="answer-card">{clickable_response}</div>', unsafe_allow_html=True
-                )
+                st.markdown(clickable_response, unsafe_allow_html=True)
 
                 # Show agent badge for LogicRAG multi-hop queries
                 if agent_used == "logic_rag":
@@ -819,9 +816,9 @@ DATABASE_URL=postgresql://user:pass@server:5432/db?sslmode=require
                         f"{len(subproblems)} sub-problems"
                     )
 
-                # Show compact sources below answer
+                # Inline source list + details button
                 if sources:
-                    render_sources_compact(sources, response)
+                    render_sources_inline(sources, "sources_live")
 
                 if st.session_state.debug_mode:
                     with st.expander("Debug Info", expanded=False):
@@ -853,8 +850,6 @@ DATABASE_URL=postgresql://user:pass@server:5432/db?sslmode=require
                         "metadata": result.get("metadata", {}),
                     }
                 )
-                st.session_state.references_last = sources
-                st.session_state.answer_last = response
 
         st.rerun()
 
