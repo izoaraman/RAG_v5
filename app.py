@@ -148,7 +148,7 @@ html, body, [data-testid="stAppViewContainer"], .main {background: #ffffff;}
     font-size: 17px;
     flex-grow: 1;
 }
-.source-score {
+.source-page {
     background: linear-gradient(135deg, #1CCFC9 0%, #17b0aa 100%);
     color: white;
     font-weight: 600;
@@ -356,6 +356,19 @@ def _resolve_source_file(doc_source: str) -> Path | None:
     return None
 
 
+def _format_page(page) -> str:
+    """Format page number(s) for display."""
+    if page is None or page == "N/A":
+        return "N/A"
+    if isinstance(page, list):
+        if len(page) == 0:
+            return "N/A"
+        if len(page) == 1:
+            return str(page[0])
+        return f"{page[0]}-{page[-1]}"
+    return str(page)
+
+
 def render_sources_detailed(sources: list, key_prefix: str = "detail"):
     """Render sources in detailed card format with links to originals."""
     if not sources:
@@ -369,12 +382,14 @@ def render_sources_detailed(sources: list, key_prefix: str = "detail"):
             doc_source = source.get("document_source", source.get("source", ""))
             score = source.get("score", 0)
             chunk_index = source.get("chunk_index", 0)
+            page = source.get("page", source.get("metadata", {}).get("page"))
         else:
             content = getattr(source, "content", str(source))
             doc_title = getattr(source, "document_title", f"Source {i}")
             doc_source = getattr(source, "document_source", "")
             score = getattr(source, "score", 0)
             chunk_index = getattr(source, "chunk_index", 0)
+            page = getattr(source, "page", None)
 
         snippet = content[:500] + "..." if len(content) > 500 else content
         is_url = doc_source.startswith("http") if doc_source else False
@@ -401,7 +416,7 @@ def render_sources_detailed(sources: list, key_prefix: str = "detail"):
             <div class="source-header">
                 <span class="source-detail-number">[{i}]</span>
                 <span class="source-filename">{title_html}</span>
-                <span class="source-score">Score: {score:.3f}</span>
+                <span class="source-page">Page: {_format_page(page)}</span>
             </div>
             <div style="color: #7a8199; font-size: 13px; margin-bottom: 10px;">
                 Chunk: {chunk_index} | Source: {source_link}

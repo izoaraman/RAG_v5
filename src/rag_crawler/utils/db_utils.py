@@ -48,7 +48,7 @@ class DatabasePool:
                         min_size=1,
                         max_size=10,
                         max_inactive_connection_lifetime=300,
-                        command_timeout=15,
+                        command_timeout=60,
                         timeout=10,  # Connection timeout (reduced from 30s)
                     )
                     logger.info("Database connection pool initialized")

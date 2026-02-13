@@ -39,7 +39,7 @@ class LogicRAGAgent:
         retriever: VectorRetriever | None = None,
         reranker: BaseReranker | None = None,
         rolling_memory: RollingMemory | None = None,
-        max_rounds: int = 5,
+        max_rounds: int = 2,
         retrieval_top_k: int = 5,
         rerank_top_k: int = 3,
         threshold: float = 0.3,
@@ -238,39 +238,11 @@ class LogicRAGAgent:
 
         return ranks
 
-    async def _merge_subproblems(self, subproblems: list[str]) -> str:
-        """Merge multiple independent subproblems into a single query for efficiency."""
+    def _merge_subproblems(self, subproblems: list[str]) -> str:
+        """Merge multiple independent subproblems into a single query (no LLM call)."""
         if len(subproblems) == 1:
             return subproblems[0]
-
-        if len(subproblems) == 2:
-            return f"{subproblems[0]} AND {subproblems[1]}"
-
-        # For 3+, use LLM to create a concise unified query
-        messages = [
-            SystemMessage(
-                content=(
-                    "Merge multiple related questions into one concise query. "
-                    "Return only the merged query, nothing else."
-                )
-            ),
-            HumanMessage(
-                content=(
-                    "Merge these questions into one query:\n"
-                    + "\n".join(f"- {sp}" for sp in subproblems)
-                )
-            ),
-        ]
-
-        try:
-            response = await self.llm.ainvoke(messages)
-            content = response.content
-            merged = content.strip() if isinstance(content, str) else str(content).strip()
-            logger.info(f"Merged {len(subproblems)} subproblems into: {merged[:80]}...")
-            return merged
-        except Exception as e:
-            logger.warning(f"Subproblem merge failed, using concatenation: {e}")
-            return " AND ".join(subproblems)
+        return " AND ".join(subproblems)
 
     @staticmethod
     def _apply_diversity_filter(
@@ -413,7 +385,7 @@ class LogicRAGAgent:
             warm_contexts = summary_contexts + [doc.content for doc in warm_docs]
             info_summary = await self.rolling_memory.create_initial_summary(query, warm_contexts)
 
-            sufficiency = await self.rolling_memory.check_sufficiency(query, info_summary)
+            # Skip initial sufficiency check — always decompose to save 1 LLM call
             round_count = 0
 
             subproblems: list[str] = []
@@ -421,76 +393,74 @@ class LogicRAGAgent:
             sorted_subproblems: list[str] = []
             last_round_docs = documents_to_state_format(warm_docs)[: self.rerank_top_k]
 
-            if not sufficiency.get("can_answer", False):
-                # Stage 2: Decomposition
-                decomposition = await self._decompose_query(query, info_summary)
-                subproblems = decomposition.get("subproblems", [])
-                dependency_pairs = decomposition.get("dependency_pairs", [])
-                sorted_subproblems = self._topological_sort(subproblems, dependency_pairs)
+            # Stage 2: Decomposition (always run — skipping pre-check saves 1 LLM call)
+            decomposition = await self._decompose_query(query, info_summary)
+            subproblems = decomposition.get("subproblems", [])
+            dependency_pairs = decomposition.get("dependency_pairs", [])
+            sorted_subproblems = self._topological_sort(subproblems, dependency_pairs)
 
-                # Compute rank-based groups for parallel execution
-                ranks = self._compute_ranks(subproblems, dependency_pairs)
-                logger.info(
-                    f"Decomposed into {len(subproblems)} subproblems across {len(ranks)} ranks"
+            # Compute rank-based groups for parallel execution
+            ranks = self._compute_ranks(subproblems, dependency_pairs)
+            logger.info(f"Decomposed into {len(subproblems)} subproblems across {len(ranks)} ranks")
+
+            # Stage 3: Rank-based iterative retrieval (parallel within ranks)
+            for rank_idx, rank_group in enumerate(ranks):
+                if round_count >= self.max_rounds:
+                    break
+
+                is_last_round = (rank_idx == len(ranks) - 1) or (round_count + 1 >= self.max_rounds)
+
+                # Graph pruning: merge if rank has 2+ subproblems (no LLM call)
+                if len(rank_group) >= 2:
+                    queries_to_retrieve = [self._merge_subproblems(rank_group)]
+                else:
+                    queries_to_retrieve = rank_group
+
+                # Parallel retrieval for all queries in this rank
+                retrieval_tasks = [
+                    self._retrieve_and_rerank(
+                        query=q,
+                        source_filter=source_filter,
+                        exclude_chunks=seen_chunk_ids,
+                    )
+                    for q in queries_to_retrieve
+                ]
+                rank_results = await asyncio.gather(*retrieval_tasks)
+
+                # Collect results from all parallel retrievals
+                rank_docs: list[dict[str, Any]] = []
+                for round_docs in rank_results:
+                    if round_docs:
+                        rank_docs.extend(round_docs)
+
+                round_count += 1
+
+                if not rank_docs:
+                    continue
+
+                # Apply document diversity filtering
+                rank_docs = self._apply_diversity_filter(rank_docs, seen_doc_counts)
+
+                last_round_docs = rank_docs
+                for doc in rank_docs:
+                    chunk_id = doc.get("chunk_id", "")
+                    doc_id = doc.get("document_id", "")
+                    if chunk_id:
+                        seen_chunk_ids.add(chunk_id)
+                    if doc_id:
+                        seen_doc_counts[doc_id] = seen_doc_counts.get(doc_id, 0) + 1
+
+                all_docs_state.extend(rank_docs)
+
+                new_contexts = [doc.get("content", "") for doc in rank_docs if doc.get("content")]
+                info_summary = await self.rolling_memory.refine_summary(
+                    query,
+                    info_summary,
+                    new_contexts,
                 )
 
-                # Stage 3: Rank-based iterative retrieval (parallel within ranks)
-                for rank_group in ranks:
-                    if round_count >= self.max_rounds:
-                        break
-
-                    # Graph pruning: merge if rank has 3+ subproblems
-                    if len(rank_group) >= 3:
-                        merged_query = await self._merge_subproblems(rank_group)
-                        queries_to_retrieve = [merged_query]
-                    else:
-                        queries_to_retrieve = rank_group
-
-                    # Parallel retrieval for all queries in this rank
-                    retrieval_tasks = [
-                        self._retrieve_and_rerank(
-                            query=q,
-                            source_filter=source_filter,
-                            exclude_chunks=seen_chunk_ids,
-                        )
-                        for q in queries_to_retrieve
-                    ]
-                    rank_results = await asyncio.gather(*retrieval_tasks)
-
-                    # Collect results from all parallel retrievals
-                    rank_docs: list[dict[str, Any]] = []
-                    for round_docs in rank_results:
-                        if round_docs:
-                            rank_docs.extend(round_docs)
-
-                    round_count += 1
-
-                    if not rank_docs:
-                        continue
-
-                    # Apply document diversity filtering
-                    rank_docs = self._apply_diversity_filter(rank_docs, seen_doc_counts)
-
-                    last_round_docs = rank_docs
-                    for doc in rank_docs:
-                        chunk_id = doc.get("chunk_id", "")
-                        doc_id = doc.get("document_id", "")
-                        if chunk_id:
-                            seen_chunk_ids.add(chunk_id)
-                        if doc_id:
-                            seen_doc_counts[doc_id] = seen_doc_counts.get(doc_id, 0) + 1
-
-                    all_docs_state.extend(rank_docs)
-
-                    new_contexts = [
-                        doc.get("content", "") for doc in rank_docs if doc.get("content")
-                    ]
-                    info_summary = await self.rolling_memory.refine_summary(
-                        query,
-                        info_summary,
-                        new_contexts,
-                    )
-
+                # Skip sufficiency check on the last round — saves 1 LLM call
+                if not is_last_round:
                     sufficiency = await self.rolling_memory.check_sufficiency(
                         query,
                         info_summary,

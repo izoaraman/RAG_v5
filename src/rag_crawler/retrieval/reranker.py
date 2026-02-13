@@ -80,11 +80,12 @@ class FlashRankReranker(BaseReranker):
     FlashRank-based reranker for fast local reranking.
 
     Uses lightweight models for rapid inference without external API calls.
+    Model is lazy-loaded on first rerank() call to avoid slow startup.
     """
 
     def __init__(self, model_name: str = "ms-marco-MiniLM-L-12-v2"):
         """
-        Initialize FlashRank reranker.
+        Initialize FlashRank reranker (model loaded lazily on first use).
 
         Args:
             model_name: Model to use for reranking.
@@ -96,17 +97,24 @@ class FlashRankReranker(BaseReranker):
             raise ImportError("FlashRank not available. Install with: pip install flashrank")
 
         self.model_name = model_name
+        self._ranker: "Ranker | None" = None
+        logger.info(f"FlashRankReranker created (lazy-load): {model_name}")
 
-        try:
-            self.ranker = Ranker(model_name=model_name, cache_dir="./.flashrank_cache")
-            logger.info(f"FlashRankReranker initialized with model: {model_name}")
-        except TypeError:
+    @property
+    def ranker(self) -> "Ranker":
+        """Lazy-load the FlashRank model on first access."""
+        if self._ranker is None:
+            logger.info(f"Loading FlashRank model: {self.model_name}")
             try:
-                self.ranker = Ranker(model=model_name)
-                logger.info(f"FlashRankReranker initialized (legacy API): {model_name}")
-            except Exception as e:
-                self.ranker = Ranker()
-                logger.warning(f"Using default FlashRank model due to: {e}")
+                self._ranker = Ranker(model_name=self.model_name, cache_dir="./.flashrank_cache")
+            except TypeError:
+                try:
+                    self._ranker = Ranker(model=self.model_name)
+                except Exception as e:
+                    self._ranker = Ranker()
+                    logger.warning(f"Using default FlashRank model due to: {e}")
+            logger.info(f"FlashRank model loaded: {self.model_name}")
+        return self._ranker
 
     def rerank(
         self,
@@ -161,11 +169,12 @@ class CrossEncoderReranker(BaseReranker):
     Cross-Encoder based reranker using sentence-transformers.
 
     Provides high accuracy reranking with detailed similarity scoring.
+    Model is lazy-loaded on first rerank() call to avoid slow startup.
     """
 
     def __init__(self, model_name: str = "BAAI/bge-reranker-v2-m3"):
         """
-        Initialize Cross-Encoder reranker.
+        Initialize Cross-Encoder reranker (model loaded lazily on first use).
 
         Args:
             model_name: Model to use for reranking.
@@ -176,8 +185,17 @@ class CrossEncoderReranker(BaseReranker):
             raise ImportError("sentence-transformers not available")
 
         self.model_name = model_name
-        self.model = CrossEncoder(model_name)
-        logger.info(f"CrossEncoderReranker initialized with model: {model_name}")
+        self._model: "CrossEncoder | None" = None
+        logger.info(f"CrossEncoderReranker created (lazy-load): {model_name}")
+
+    @property
+    def model(self) -> "CrossEncoder":
+        """Lazy-load the CrossEncoder model on first access."""
+        if self._model is None:
+            logger.info(f"Loading CrossEncoder model: {self.model_name}")
+            self._model = CrossEncoder(self.model_name)
+            logger.info(f"CrossEncoder model loaded: {self.model_name}")
+        return self._model
 
     def rerank(
         self,

@@ -5,6 +5,7 @@ Orchestrates query classification, agent routing, retrieval, and response genera
 using LangGraph StateGraph.
 """
 
+import asyncio
 import logging
 import uuid
 from typing import Any, Literal
@@ -199,8 +200,11 @@ class RAGRouter:
         logger.info(f"Processing query (session: {session_id[:8]}...): {query[:50]}...")
 
         try:
-            # Run the graph
-            result = await self.compiled_graph.ainvoke(state)
+            # Run the graph with a 120-second timeout to prevent infinite hangs
+            result = await asyncio.wait_for(
+                self.compiled_graph.ainvoke(state),
+                timeout=120.0,
+            )
 
             # Update conversation memory
             memory.add_user_message(query)
@@ -224,6 +228,19 @@ class RAGRouter:
             response_text = str(response.get("response", ""))
             logger.info(f"Query processed successfully: {len(response_text)} chars")
             return response
+
+        except asyncio.TimeoutError:
+            logger.error(f"Query processing timed out after 120s: {query[:50]}...")
+            return {
+                "session_id": session_id,
+                "query": query,
+                "response": (
+                    "The query took too long to process (over 2 minutes). "
+                    "Please try a simpler question or rephrase your query."
+                ),
+                "sources": [],
+                "error": "Query processing timed out after 120 seconds",
+            }
 
         except Exception as e:
             logger.error(f"Query processing failed: {e}")

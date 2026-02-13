@@ -157,12 +157,38 @@ class DoclingHybridChunker:
                 token_count = len(self.tokenizer.encode(contextualized_text))
                 chunk_hash = hashlib.sha256(chunk_content.lower().encode()).hexdigest()
 
+                # Extract page numbers from Docling provenance
+                page_numbers = []
+                try:
+                    meta = getattr(chunk, "meta", None)
+                    if meta is not None:
+                        doc_items = getattr(meta, "doc_items", None) or []
+                        for item in doc_items:
+                            prov_list = getattr(item, "prov", None) or []
+                            for prov in prov_list:
+                                page_no = getattr(prov, "page_no", None)
+                                if page_no is not None:
+                                    page_numbers.append(page_no)
+                    page_numbers = sorted(set(page_numbers))
+                    if i == 0:
+                        logger.info(
+                            f"Page extraction sample (chunk 0): "
+                            f"meta={meta is not None}, "
+                            f"doc_items={len(getattr(meta, 'doc_items', []) or []) if meta else 0}, "
+                            f"pages={page_numbers}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Could not extract page numbers from chunk {i}: {e}")
+
                 chunk_metadata = {
                     **base_metadata,
                     "total_chunks": len(chunks),
                     "token_count": token_count,
                     "has_context": True,
                     "content_hash": chunk_hash,
+                    "page": page_numbers[0]
+                    if len(page_numbers) == 1
+                    else (page_numbers if page_numbers else None),
                 }
 
                 start_char = current_pos
@@ -233,6 +259,7 @@ class DoclingHybridChunker:
                             "chunk_method": "simple_fallback",
                             "total_chunks": -1,
                             "content_hash": chunk_hash,
+                            "page": None,
                         },
                         token_count=token_count,
                         content_hash=chunk_hash,
