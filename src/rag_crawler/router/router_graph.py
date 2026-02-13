@@ -230,16 +230,16 @@ class RAGRouter:
             return response
 
         except asyncio.TimeoutError:
-            logger.error(f"Query processing timed out after 120s: {query[:50]}...")
+            logger.error(f"Query processing timed out after 180s: {query[:50]}...")
             return {
                 "session_id": session_id,
                 "query": query,
                 "response": (
-                    "The query took too long to process (over 2 minutes). "
+                    "The query took too long to process (over 3 minutes). "
                     "Please try a simpler question or rephrase your query."
                 ),
                 "sources": [],
-                "error": "Query processing timed out after 120 seconds",
+                "error": "Query processing timed out after 180 seconds",
             }
 
         except Exception as e:

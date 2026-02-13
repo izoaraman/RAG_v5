@@ -241,6 +241,7 @@ Respond with JSON only."""
             r"how did.*lead to",
             r"how does.*affect.*(?:and|while|considering)",
             r"compare.*and.*in terms of",
+            r"compare.*between",
             r"implications of.*for",
             r"what caused.*to",
             r"connection between",
@@ -289,21 +290,26 @@ Respond with JSON only."""
             "evaluate",
             "assess",
             "describe how",
+            "describe the",
             "why does",
             "why is",
             "why are",
             "what are the implications",
             "pros and cons",
             "comprehensive",
+            "detail",
             "detailed",
             "in-depth",
+            "in depth",
             "thorough",
             "how does",
+            "how do",
             "impact of",
             "effect of",
             "advantages and disadvantages",
             "summarize",
             "summarise",
+            "summary of",
             "overview of",
             "discuss",
             "elaborate",
@@ -312,8 +318,33 @@ Respond with JSON only."""
             "how can",
             "how should",
             "what steps",
+            "walk me through",
+            "break down",
+            "breakdown",
+            "tell me about",
+            "tell me more",
+            "go through",
+            "deep dive",
         ]
         depth_score = sum(1 for p in depth_patterns if p in query_lower)
+
+        # Document-specific queries: naming a specific document/file/report
+        # signals the user wants substantive analysis, not a quick fact
+        doc_specific_patterns = [
+            r"\.pdf",
+            r"\.docx?",
+            r"\.xlsx?",
+            r"annual.report",
+            r"enterprise.agreement",
+            r"compliance.*enforcement",
+            r"policies.*priorities",
+            r"in\s+(?:the\s+)?(?:document|report|file|paper|policy)",
+            r"about\s+(?:the\s+)?(?:document|report|file|paper|policy)",
+            r"from\s+(?:the\s+)?(?:document|report|file|paper|policy)",
+            r"(?:accc|aer)[\s\-][\w\-]+[\s\-][\w\-]+",  # e.g. "accc-compliance-enforcement..."
+        ]
+        if any(re.search(p, query_lower) for p in doc_specific_patterns):
+            depth_score += 2
 
         # Longer queries tend to be more complex
         if word_count > 20:
@@ -340,21 +371,28 @@ Respond with JSON only."""
             "name the",
             "give me",
             "show me",
-            "tell me",
             "is there",
             "does it",
             "do they",
-            "can you",
             "what does",
         ]
         quick_score = sum(1 for p in quick_patterns if p in query_lower)
 
         # Very short queries are almost always quick facts
-        if word_count <= 6:
+        # But only if no depth signals were detected (e.g. "explain X" is short but in-depth)
+        if word_count <= 6 and depth_score == 0:
             quick_score += 2
 
-        # Decision
-        if depth_score > quick_score:
+        # Demote quick_score when depth signals are present:
+        # "can you", "tell me" are conversational fluff, not intent signals.
+        # They shouldn't push toward quick_fact when depth patterns already matched.
+        if depth_score > 0:
+            fluff_patterns = ["can you", "could you", "please"]
+            fluff_count = sum(1 for p in fluff_patterns if p in query_lower)
+            quick_score = max(0, quick_score - fluff_count)
+
+        # Decision — tie favors in-depth (better to over-explain than under-explain)
+        if depth_score >= quick_score:
             return QueryAnalysis(
                 intent=QueryIntent.IN_DEPTH,
                 confidence=0.7,
