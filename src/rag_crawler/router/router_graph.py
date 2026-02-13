@@ -200,10 +200,10 @@ class RAGRouter:
         logger.info(f"Processing query (session: {session_id[:8]}...): {query[:50]}...")
 
         try:
-            # Run the graph with a 120-second timeout to prevent infinite hangs
+            # Run the graph with a 180-second timeout to prevent infinite hangs
             result = await asyncio.wait_for(
                 self.compiled_graph.ainvoke(state),
-                timeout=120.0,
+                timeout=180.0,
             )
 
             # Update conversation memory

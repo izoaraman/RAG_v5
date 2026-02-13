@@ -29,6 +29,8 @@ def get_shared_llm(temperature: float = 0.0) -> AzureChatOpenAI:
             api_key=SecretStr(api_key) if api_key else None,
             api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
             temperature=temperature,
+            timeout=90,
+            max_retries=2,
         )
     return _shared_llm
 
@@ -61,6 +63,7 @@ def get_embedding_client() -> AsyncAzureOpenAI:
         api_key=api_key,
         azure_endpoint=endpoint,
         api_version=api_version,
+        timeout=60.0,
     )
 
 
