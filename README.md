@@ -4,29 +4,101 @@ An agentic RAG (Retrieval Augmented Generation) system with LangGraph routing, A
 
 ## Architecture
 
+### System Overview
+
 ```
-User Query
-    │
-    ▼
-┌─────────────────┐
-│ Query Classifier │ (LLM-based classification)
-└────────┬────────┘
-         │
-    ┌────┴────┐
-    ▼         ▼
-┌────────┐ ┌──────────┐
-│ Quick  │ │ In-Depth │
-│ Fact   │ │ Agent    │
-│ Agent  │ │          │
-└────┬───┘ └────┬─────┘
-     │          │
-     └────┬─────┘
-          ▼
-┌─────────────────┐
-│ Response        │
-│ Generator       │
-└─────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              STREAMLIT UI (app.py)                          │
+│  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐  │
+│  │  Ask Mode   │  │ URL Crawler  │  │ Doc Upload   │  │ Session Memory  │  │
+│  └──────┬──────┘  └──────┬───────┘  └──────┬───────┘  └─────────────────┘  │
+└─────────┼────────────────┼─────────────────┼────────────────────────────────┘
+          │                │                 │
+          ▼                ▼                 ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         DOCUMENT INGESTION PIPELINE                          │
+│                                                                              │
+│  ┌──────────────────┐    ┌──────────────────┐    ┌────────────────────┐    │
+│  │   RAGCrawler     │    │ DoclingExtractor │    │  EntityExtractor   │    │
+│  │   (Crawl4AI)     │───▶│  (PDF/DOCX/PPTX) │───▶│  DocumentSummarizer│    │
+│  └──────────────────┘    └────────┬─────────┘    └──────────┬─────────┘    │
+│                                   │                         │               │
+│                                   ▼                         │               │
+│                          ┌──────────────────┐               │               │
+│                          │ DoclingHybrid    │               │               │
+│                          │ Chunker          │◀──────────────┘               │
+│                          └────────┬─────────┘                               │
+│                                   │                                          │
+│                                   ▼                                          │
+│                          ┌──────────────────┐                               │
+│                          │ EmbeddingGenerator│                               │
+│                          │ (Azure OpenAI)   │                               │
+│                          └────────┬─────────┘                               │
+│                                   │                                          │
+│                                   ▼                                          │
+│                          ┌──────────────────┐                               │
+│                          │ PostgreSQL       │                               │
+│                          │ + pgvector       │                               │
+│                          └──────────────────┘                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     AGENTIC RAG PIPELINE (LangGraph)                         │
+│                                                                              │
+│  User Query ──▶ ┌───────────────────────┐                                   │
+│                 │   Query Classifier     │ (Heuristic + LLM)                │
+│                 └───────────┬───────────┘                                   │
+│                             │                                                │
+│            ┌────────────────┼────────────────┐                              │
+│            ▼                ▼                ▼                              │
+│    ┌──────────────┐ ┌──────────────┐ ┌──────────────┐                      │
+│    │ QuickFact    │ │  InDepth     │ │  LogicRAG    │                      │
+│    │ Agent        │ │  Agent       │ │  Agent       │                      │
+│    │ (top_k=3)    │ │ (top_k=10)   │ │ (Multi-hop)  │                      │
+│    └──────┬───────┘ └──────┬───────┘ └──────┬───────┘                      │
+│           │                │                │                               │
+│           ▼                ▼                ▼                               │
+│    ┌─────────────────────────────────────────────────────┐                 │
+│    │              RETRIEVAL SYSTEM                        │                 │
+│    │  ┌───────────────┐  ┌────────────────────────────┐  │                 │
+│    │  │VectorRetriever│─▶│ Reranker (FlashRank/Cross- │  │                 │
+│    │  │ (pgvector)    │  │ Encoder/Hybrid)            │  │                 │
+│    │  └───────────────┘  └────────────────────────────┘  │                 │
+│    └─────────────────────────────────────────────────────┘                 │
+│           │                │                │                               │
+│           └────────────────┼────────────────┘                               │
+│                            ▼                                                │
+│                 ┌───────────────────────┐                                   │
+│                 │  Response Generator   │ (Azure OpenAI + Citations)        │
+│                 └───────────┬───────────┘                                   │
+│                             │                                                │
+│                             ▼                                                │
+│                 ┌───────────────────────┐                                   │
+│                 │  ConversationMemory   │                                   │
+│                 │  + RollingMemory      │                                   │
+│                 └───────────────────────┘                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Query Classification & Routing
+
+| Intent | Description | Agent | Retrieval Strategy |
+|--------|-------------|-------|-------------------|
+| **QUICK_FACT** | Simple factual questions | QuickFactAgent | top_k=3, direct answer |
+| **IN_DEPTH** | Complex analysis/comparison | InDepthAgent | top_k=10 + reranking |
+| **MULTI_HOP** | Multi-step reasoning | LogicRAGAgent | Query decomposition + rolling memory |
+
+### Technology Stack
+
+| Layer | Technologies |
+|-------|--------------|
+| **Frontend** | Streamlit 1.40+ |
+| **Orchestration** | LangGraph 0.2+, LangChain 0.3+ |
+| **LLM & Embeddings** | Azure OpenAI (GPT-4.1, text-embedding-3-small) |
+| **Document Processing** | Docling 2.55+, Crawl4AI 0.4+ |
+| **Vector Database** | PostgreSQL + pgvector, asyncpg |
+| **Reranking** | FlashRank 0.2+, sentence-transformers 3.0+ |
+| **Package Management** | UV (Astral) |
 
 ## Features
 
@@ -115,22 +187,39 @@ uv run rag-ingest --documents ./documents --force-update
 
 ```
 src/rag_crawler/
-├── main.py              # CLI entry point for crawler
-├── crawler.py           # Web crawling logic
-├── config.py            # Configuration settings
-├── extractors/          # Document extraction
-│   ├── docling_extractor.py
-│   └── document.py
-├── ingestion/           # Ingestion pipeline
-│   ├── ingest.py        # Main ingestion orchestrator
-│   ├── chunker.py       # Document chunking
-│   └── embedder.py      # Embedding generation
-├── output/              # Output formatters
-│   └── markdown.py
-└── utils/               # Utilities
-    ├── db_utils.py      # PostgreSQL operations
-    ├── models.py        # Data models
-    └── providers.py     # Azure OpenAI client
+├── main.py                    # CLI entry point
+├── crawler.py                 # Web crawling (Crawl4AI)
+├── config.py                  # Configuration settings
+├── agents/                    # Agentic components
+│   ├── query_classifier.py    # Intent classification
+│   ├── quick_fact_agent.py    # Fast retrieval agent
+│   ├── in_depth_agent.py      # Extended analysis agent
+│   ├── logic_rag_agent.py     # Multi-hop reasoning agent
+│   └── response_generator.py  # Response synthesis
+├── router/                    # LangGraph router
+│   ├── state.py               # RAGState definition
+│   └── router_graph.py        # StateGraph workflow
+├── retrieval/                 # Retrieval layer
+│   ├── vector_retriever.py    # pgvector search
+│   ├── reranker.py            # FlashRank/CrossEncoder
+│   ├── memory.py              # Conversation memory
+│   └── rolling_memory.py      # Multi-hop context
+├── extractors/                # Document extraction
+│   ├── docling_extractor.py   # Multi-format extraction
+│   └── document.py            # Document models
+├── ingestion/                 # Ingestion pipeline
+│   ├── ingest.py              # Pipeline orchestrator
+│   ├── chunker.py             # Structure-aware chunking
+│   ├── embedder.py            # Azure OpenAI embeddings
+│   ├── entity_extractor.py    # Entity/topic extraction
+│   └── summarizer.py          # LLM summarization
+├── output/                    # Output formatters
+│   └── markdown.py            # Markdown generation
+└── utils/                     # Utilities
+    ├── db_utils.py            # PostgreSQL operations
+    ├── models.py              # Pydantic data models
+    ├── providers.py           # LLM client factory
+    └── azure_providers.py     # Azure configuration
 ```
 
 ## Requirements
@@ -239,38 +328,50 @@ status = validate_azure_configuration()
 print(status)
 ```
 
-## Project Structure
+## Full Project Structure
 
 ```
 RAG_v5/
-├── app.py                    # Streamlit chat interface
-├── pyproject.toml            # Project configuration
-├── .env.example              # Environment template
+├── app.py                         # Streamlit chat interface
+├── pyproject.toml                 # Project configuration (UV)
+├── .env.example                   # Environment template
+├── data/                          # Runtime data
+│   ├── documents/                 # Document storage
+│   └── new_uploads/               # Uploaded files
 ├── src/rag_crawler/
-│   ├── crawler.py            # Web crawling
-│   ├── config.py             # Settings
-│   ├── agents/               # Agentic components
-│   │   ├── query_classifier.py
-│   │   ├── quick_fact_agent.py
-│   │   ├── in_depth_agent.py
-│   │   └── response_generator.py
-│   ├── router/               # LangGraph router
-│   │   ├── state.py          # RAGState definition
-│   │   └── router_graph.py   # StateGraph workflow
-│   ├── retrieval/            # Retrieval layer
-│   │   ├── vector_retriever.py
-│   │   ├── reranker.py
-│   │   └── memory.py
-│   ├── ingestion/            # Ingestion pipeline
-│   │   ├── ingest.py
-│   │   ├── chunker.py
-│   │   └── embedder.py
-│   ├── extractors/           # Document extraction
-│   │   └── docling_extractor.py
-│   └── utils/                # Utilities
-│       ├── azure_providers.py
-│       ├── db_utils.py
-│       └── models.py
+│   ├── main.py                    # CLI entry point
+│   ├── crawler.py                 # Web crawling (Crawl4AI)
+│   ├── config.py                  # Settings & configuration
+│   ├── agents/                    # Agentic components
+│   │   ├── query_classifier.py    # Heuristic + LLM classification
+│   │   ├── quick_fact_agent.py    # Fast retrieval (top_k=3)
+│   │   ├── in_depth_agent.py      # Extended analysis (top_k=10)
+│   │   ├── logic_rag_agent.py     # Multi-hop reasoning
+│   │   └── response_generator.py  # LLM response synthesis
+│   ├── router/                    # LangGraph router
+│   │   ├── state.py               # RAGState TypedDict
+│   │   └── router_graph.py        # StateGraph workflow
+│   ├── retrieval/                 # Retrieval layer
+│   │   ├── vector_retriever.py    # pgvector similarity search
+│   │   ├── reranker.py            # FlashRank/CrossEncoder/Hybrid
+│   │   ├── memory.py              # Conversation & session memory
+│   │   └── rolling_memory.py      # Multi-hop context compression
+│   ├── ingestion/                 # Ingestion pipeline
+│   │   ├── ingest.py              # Pipeline orchestrator
+│   │   ├── chunker.py             # DoclingHybridChunker
+│   │   ├── embedder.py            # Azure OpenAI embeddings
+│   │   ├── entity_extractor.py    # Regex entity extraction
+│   │   └── summarizer.py          # LLM document summarization
+│   ├── extractors/                # Document extraction
+│   │   ├── docling_extractor.py   # PDF/DOCX/PPTX/XLSX/HTML/OCR
+│   │   └── document.py            # Document data models
+│   ├── output/                    # Output formatters
+│   │   └── markdown.py            # Crawl report generation
+│   └── utils/                     # Utilities
+│       ├── db_utils.py            # PostgreSQL/pgvector operations
+│       ├── models.py              # Pydantic configuration models
+│       ├── providers.py           # LLM client factory (singleton)
+│       └── azure_providers.py     # Azure OpenAI validation
 ```
 
 ## Troubleshooting
